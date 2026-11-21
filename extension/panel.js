@@ -12,7 +12,6 @@ const ui = {
   source: $("source"), clip: $("clip"), skeleton: $("suggestion-skeleton"),
   preview: $("preview-button"), status: $("status"), notice: $("recording-note"),
   sections: $("sections"), conversation: $("conversation"),
-  products: $("products"), productResults: $("product-results"), productsTitle: $("products-title"),
   focus: $("moment-focus"), focusImage: $("focus-image"), focusTitle: $("focus-title"),
   focusDetail: $("focus-detail"), focusPlaceholder: $("focus-placeholder"), focusActions: $("focus-actions"),
   focusRecipes: $("focus-recipes"), focusIngredients: $("focus-ingredients"), focusTip: $("focus-tip"), focusTipText: $("focus-tip-text"),
@@ -28,6 +27,7 @@ let recent = [];
 let renderedChip = false;
 let sectionsPending = false;
 let routingPending = false;
+let sectionOrder = [];
 const chipGroups = new Map();
 const chipEntries = new Map();
 const lookupEntries = new Map();
@@ -105,14 +105,8 @@ function setNotice(message, error = false) {
 function updateFocusActions() {
   const isDish = ui.focus.dataset.kind === "dish";
   ui.focusRecipes.hidden = !isDish || !ui.sections.querySelector('[data-kind="recipe"]');
-  ui.focusIngredients.hidden = !isDish || ui.products.hidden || !ui.productResults.querySelector("[data-ingredient]");
+  ui.focusIngredients.hidden = !isDish || !ui.sections.querySelector("[data-ingredient]");
   ui.focusActions.hidden = ui.focusRecipes.hidden && ui.focusIngredients.hidden;
-}
-
-function updateProducts() {
-  ui.products.hidden = !productUrls.size && !ui.productResults.querySelector('[aria-busy="true"]');
-  ui.productsTitle.textContent = ui.productResults.querySelector("[data-ingredient]") ? "Shop ingredients" : "Products";
-  updateFocusActions();
 }
 
 function showFocus(focus) {
@@ -156,10 +150,9 @@ function stopTask() {
   shownVideos.clear();
   catalogImages.clear();
   pendingProductImages.clear();
-  ui.sections.replaceChildren(ui.products);
-  ui.productResults.replaceChildren();
+  sectionOrder = [];
+  ui.sections.replaceChildren();
   resetFocus();
-  updateProducts();
   ui.conversation.replaceChildren();
   ui.question.value = "";
   ui.question.disabled = true;
@@ -183,20 +176,54 @@ function preview(job) {
   ui.source.textContent = job.host;
 }
 
-function getGroup(title, explanation = false) {
-  if (title.toLowerCase() === "products") title = "Product details";
-  const key = title.toLowerCase();
+function orderGroups() {
+  if (!sectionOrder.length) return;
+  const ranks = new Map(sectionOrder.map(({ title }, index) => [chipKey(title), index]));
+  const blocks = [...ui.sections.children];
+  blocks.sort((first, second) => (ranks.get(first.dataset.section) ?? Infinity) -
+    (ranks.get(second.dataset.section) ?? Infinity));
+  const focused = ui.sections.contains(document.activeElement) ? document.activeElement : null;
+  for (const [index, block] of blocks.entries()) {
+    const current = ui.sections.children[index];
+    if (current !== block) ui.sections.insertBefore(block, current ?? null);
+  }
+  if (focused && focused !== document.activeElement) focused.focus({ preventScroll: true });
+}
+
+function setSectionPlan(plan) {
+  if (!plan) return;
+  for (const { title, role } of plan) {
+    if (role === "context") continue;
+    const previous = sectionOrder.find((section) => section.role === role);
+    if (!previous) continue;
+    const from = chipKey(previous.title);
+    const to = chipKey(title);
+    const group = chipGroups.get(from);
+    if (!group || from === to || chipGroups.has(to)) continue;
+    group.heading.textContent = title;
+    group.block.dataset.section = to;
+    chipGroups.delete(from);
+    chipGroups.set(to, group);
+  }
+  sectionOrder = plan;
+  orderGroups();
+}
+
+function getGroup(title) {
+  const key = chipKey(title);
   let group = chipGroups.get(key);
   if (!group) {
     group = {
-      block: make("section", "section"), chips: make("div", "chips"),
+      block: make("section", "section"), heading: make("h2", "", title), chips: make("div", "chips"),
       answer: make("div", "answer"), lookups: make("div", "lookup-list"), selected: null,
     };
+    group.block.dataset.section = key;
     group.answer.hidden = true;
     group.answer.setAttribute("role", "status");
-    group.block.append(make("h2", "", title), group.chips, group.answer, group.lookups);
-    ui.sections.insertBefore(group.block, explanation ? ui.products : null);
+    group.block.append(group.heading, group.chips, group.answer, group.lookups);
+    ui.sections.append(group.block);
     chipGroups.set(key, group);
+    orderGroups();
   }
   return group;
 }
@@ -262,7 +289,7 @@ function showSections(sections) {
       const key = chipKey(label);
       const questionKey = chipKey(question);
       if (!key || chipEntries.has(key) || [...chipEntries.values()].some((entry) => entry.questionKey === questionKey)) continue;
-      const group = getGroup(title, true);
+      const group = getGroup(title);
       clearPlannedGroup(group);
       const item = { label, question, answer: answer ? plainAnswer(answer) : null, sourceQuery };
       const trigger = make("button", "chip", label);
@@ -295,7 +322,7 @@ function showPlan(sections) {
   showSections(sections);
   for (const { title, layout, chips } of sections) {
     if (chips.length) continue;
-    const group = getGroup(title, layout === "chips");
+    const group = getGroup(title);
     if (group.placeholder || group.chips.children.length || group.lookups.children.length) continue;
     const placeholder = make("div", "planned-skeleton");
     placeholder.setAttribute("aria-hidden", "true");
@@ -368,21 +395,22 @@ async function refineSuggestions(providers, value, signal) {
 
 function mountLookups(links) {
   for (const { id, title, label, kind, name, exact, subject, ingredient } of links) {
+    const group = getGroup(title || name);
+    clearPlannedGroup(group);
     if (kind === "shop") {
       const body = make("div", "product-results");
+      group.block.tabIndex = -1;
       showPending(body, "Looking up products…");
       if (name) {
         body.dataset.heading = exact || ingredient ? name : "Similar to " + name;
         body.prepend(make("h3", "product-group-name", body.dataset.heading));
       }
       if (ingredient) body.dataset.ingredient = "";
-      ui.productResults.append(body);
+      group.lookups.append(body);
       lookupEntries.set(id, body);
       continue;
     }
-    const group = getGroup(title, kind === "review");
     if (kind === "recipe") group.block.tabIndex = -1;
-    clearPlannedGroup(group);
     const inline = kind !== "answer";
     const body = make("div", inline ? "lookup-inline" : "lookup-body");
     body.setAttribute("role", "status");
@@ -460,8 +488,9 @@ function showShop({ id, items, source, complete, suggestions, visual }) {
   if (complete && !grid.children.length) {
     block.remove();
     lookupEntries.delete(id);
+    pruneEmptyGroups();
   }
-  updateProducts();
+  updateFocusActions();
 
   fillProductImages();
   if (placeholders.length && moment && controller) {
@@ -671,10 +700,12 @@ function appendSearchSuggestions(block, suggestions) {
 
 function receiveAnalysis(event) {
   if (event.type === "preview") {
+    setSectionPlan(event.plan);
     showFocus(event.focus);
     showPlan(event.sections);
   }
   if (event.type === "context") {
+    setSectionPlan(event.plan);
     sectionsPending = false;
     showFocus(event.focus);
     if (event.sections.length) replaceSuggestions(event.sections);
@@ -688,7 +719,7 @@ function receiveAnalysis(event) {
       clearPlannedSections();
       setStatus();
     }
-    updateProducts();
+    updateFocusActions();
     updateSkeletons();
   }
   if (event.type === "shop") showShop(event);
@@ -702,7 +733,7 @@ function receiveAnalysis(event) {
         lookupEntries.delete(event.id);
         pruneEmptyGroups();
       }
-      updateProducts();
+      updateFocusActions();
     }
     else setNotice(event.message, true);
   }
@@ -710,7 +741,7 @@ function receiveAnalysis(event) {
   if (event.type === "done") {
     routingPending = false;
     clearPlannedSections();
-    if (!ui.status.classList.contains("error")) updateProducts();
+    updateFocusActions();
     if (!sectionsPending && !ui.status.classList.contains("error")) {
       if (ui.focusTitle.hidden) ui.focus.hidden = true;
       setStatus(chipGroups.size || productUrls.size || !ui.focusTitle.hidden ? undefined : "There was too little context for specific suggestions.");
@@ -797,7 +828,9 @@ connect();
 ui.focusRecipes.addEventListener("click", () => {
   ui.sections.querySelector('[data-kind="recipe"]')?.closest("section")?.focus();
 });
-ui.focusIngredients.addEventListener("click", () => ui.products.focus());
+ui.focusIngredients.addEventListener("click", () => {
+  ui.sections.querySelector("[data-ingredient]")?.closest("section")?.focus();
+});
 setupKeySettings((hasKey) => {
   if (!hasKey && controller) {
     stopTask();

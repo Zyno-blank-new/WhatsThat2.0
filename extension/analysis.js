@@ -1,4 +1,4 @@
-import { normalizeSections } from "./suggestions.js";
+import { chipKey, normalizeSections, sectionPlan } from "./suggestions.js";
 
 const minimumYes = 0.65;
 
@@ -21,21 +21,28 @@ function sceneFocus(value) {
 
 function modelEvidence(result, moment, preview = false) {
   const focus = sceneFocus(result.focus);
-  const products = (Array.isArray(result.products) ? result.products : []).slice(0, 2).flatMap((candidate, index) => {
+  const plan = result.plan ?? sectionPlan(result.sections);
+  const titleFor = (role) => plan.find((section) => section.role === role)?.title;
+  const shopTitle = titleFor("shopping");
+  const candidates = Array.isArray(result.products) ? result.products : [];
+  const identified = candidates.slice(0, 2).flatMap((candidate, index) => {
     const name = clean(candidate?.name, 100);
     const evidence = clean(candidate?.evidence, 240);
     if (!name || !evidence) return [];
     return [{
       id: (preview ? "preview_catalog_" : "catalog_") + index, kind: "shop", name, evidence,
+      title: shopTitle,
       description: clean(candidate.description, 120), exact: candidate.exact === true,
       productPage: candidate.productPage === true,
       maxUsd: Number.isFinite(candidate.maxUsd) ? candidate.maxUsd : null,
     }];
   });
-  if (focus?.ingredient) {
+  const products = shopTitle ? [...identified] : [];
+  if (focus?.ingredient && shopTitle) {
     const ingredient = {
       id: preview ? "preview_ingredient" : "scene_ingredient",
       kind: "shop", name: focus.ingredient, exact: false, maxUsd: null,
+      title: shopTitle,
       description: "Grocery ingredient for " + focus.title,
       evidence: focus.detail, ingredient: true,
     };
@@ -45,36 +52,39 @@ function modelEvidence(result, moment, preview = false) {
     products.unshift(ingredient);
     products.length = Math.min(products.length, 2);
   }
-  const listed = products.find((product) => product.exact && product.productPage) ||
-    (moment.amazonItem && products.find((product) => product.exact));
+  const listed = identified.find((product) => product.exact && product.productPage) ||
+    (moment.amazonItem && identified.find((product) => product.exact));
+  const reviewTitle = titleFor("review");
   const webQueries = (Array.isArray(result.webQueries) ? result.webQueries : []).slice(0, 5).flatMap((entry, index) => {
     const query = clean(entry?.query, 220);
-    const title = clean(entry?.title, 60);
+    const rawTitle = clean(entry?.title, 60);
+    const title = plan.find((section) => chipKey(section.title) === chipKey(rawTitle))?.title;
     const label = clean(entry?.label, 80);
     const kind = clean(entry?.kind, 20);
     const subject = clean(entry?.subject, 200);
     const evidence = clean(entry?.evidence, 240);
-    if (focus?.kind === "dish" && kind === "person") return [];
-    if (listed && kind === "answer" && /\breviews?\b/i.test(title + " " + label)) return [];
+    if (listed && reviewTitle && kind === "answer" && /\breviews?\b/i.test(title + " " + label)) return [];
     return query && title && label && kind && kind !== "review" && evidence
       ? [{ id: (preview ? "preview_" : "web_") + index, title, label, query, kind, subject, evidence }] : [];
   });
-  if (focus?.kind === "dish") webQueries.unshift({
+  const recipeTitle = titleFor("recipe");
+  if (focus?.kind === "dish" && recipeTitle) webQueries.unshift({
     id: preview ? "preview_recipe" : "scene_recipe", kind: "recipe",
-    title: "Recipes", label: focus.title, subject: focus.title,
+    title: recipeTitle, label: focus.title, subject: focus.title,
     query: focus.title + " home recipe ingredients instructions", evidence: focus.detail,
   });
   const place = webQueries.find(({ kind, subject }) => kind === "visit" && subject);
-  if (place && !webQueries.some((entry) => entry.kind === "video" && lookupKey(entry) === lookupKey({ ...place, kind: "video" }))) {
+  const videoTitle = titleFor("video");
+  if (place && videoTitle && !webQueries.some((entry) => entry.kind === "video" && lookupKey(entry) === lookupKey({ ...place, kind: "video" }))) {
     webQueries.push({
-      id: "place_videos", kind: "video", title: "Related videos", label: place.subject,
+      id: "place_videos", kind: "video", title: videoTitle, label: place.subject,
       subject: place.subject, query: place.subject + " site:youtube.com landmark history and on-site tour",
       evidence: place.evidence,
     });
   }
-  if (listed) {
+  if (listed && reviewTitle) {
     webQueries.unshift({
-      id: preview ? "preview_reviews" : "product_reviews", kind: "review", title: "Reviews", label: listed.name,
+      id: preview ? "preview_reviews" : "product_reviews", kind: "review", title: reviewTitle, label: listed.name,
       subject: listed.name, query: [listed.name, listed.description, "independent hands-on reviews and owner experiences"].filter(Boolean).join(" "),
       evidence: listed.productPage ? listed.evidence : "This is an Amazon item page. " + listed.evidence,
     });
@@ -127,19 +137,19 @@ function matchingPrefetch(entry, early) {
 }
 
 function lookupLink({ id, kind, title, label, name, exact, subject, ingredient }) {
-  return kind === "shop" ? { id, kind, name, exact, ...(ingredient ? { ingredient } : {}) }
+  return kind === "shop" ? { id, kind, name, exact, ...(title ? { title } : {}), ...(ingredient ? { ingredient } : {}) }
     : { id, kind, title, label, ...(kind === "visit" ? { subject } : {}) };
 }
 
-async function fetchProducts(providers, entry, signal, send, preview, approval) {
+async function fetchProducts(providers, entry, signal, send, preview) {
   const results = await Promise.allSettled(["shop", "merchantListings"].map(async (source) => {
-    const [result, approved] = await Promise.all([providers[source](entry, signal), approval]);
-    if (!approved || signal.aborted) return 0;
+    const result = await providers[source](entry, signal);
+    if (signal.aborted) return 0;
     const items = await providers.verifyProducts(entry, result.items, signal);
     if (!signal.aborted && items.length) send("shop", { id: entry.id, source, items, suggestions: result.suggestions });
     return items.length;
   }));
-  if (signal.aborted || !await approval) return false;
+  if (signal.aborted) return false;
   const found = results.some((result) => result.status === "fulfilled" && result.value > 0);
   const failed = results.every((result) => result.status === "rejected");
   if (failed && !preview) send("warning", { id: entry.id, message: "Shopping results are temporarily unavailable." });
@@ -148,7 +158,7 @@ async function fetchProducts(providers, entry, signal, send, preview, approval) 
 }
 
 async function fetchLookup(providers, entry, moment, signal, send, preview = false, approval = true) {
-  if (entry.kind === "shop") return fetchProducts(providers, entry, signal, send, preview, approval);
+  if (entry.kind === "shop") return fetchProducts(providers, entry, signal, send, preview);
   try {
     const query = entry.kind === "video" && moment.videoId ? { ...entry, excludeVideoId: moment.videoId } : entry;
     const [result, approved] = await Promise.all([providers.search(query, signal), approval]);
@@ -167,11 +177,17 @@ function startEarlyLookups(providers, plan, moment, signal, send, early) {
     entry.subject && ["recipe", "paper", "person", "video", "review"].includes(entry.kind)).slice(0, 2);
   const entries = [...evidence.products, ...evidence.webQueries];
   if (!entries.length) return;
-  const routing = providers.decide(evidence, signal).catch(() => null);
+  const routing = evidence.webQueries.length
+    ? providers.decide({ summary: evidence.summary, webQueries: evidence.webQueries }, signal).catch(() => null)
+    : Promise.resolve(null);
   return Promise.all(entries.map((entry) => {
     const task = (async () => {
+      if (entry.kind === "shop") {
+        send("lookup", { links: [lookupLink(entry)], preview: true });
+        return fetchProducts(providers, entry, signal, send, true);
+      }
       const approval = routing.then((result) => result?.[entry.id] >= minimumYes);
-      if (entry.kind === "recipe" || entry.ingredient) {
+      if (entry.kind === "recipe") {
         send("lookup", { links: [lookupLink(entry)], preview: true });
         const work = fetchLookup(providers, entry, moment, signal, send, true, approval);
         if (await approval) return work;
@@ -189,12 +205,14 @@ function startEarlyLookups(providers, plan, moment, signal, send, early) {
 
 async function runLookups(providers, evidence, result, moment, signal, send, early) {
   if (!evidence.products.length && !evidence.webQueries.length) return;
-  const routing = await providers.decide(evidence, signal).catch((error) => {
+  const routing = evidence.webQueries.length ? await providers.decide({
+    summary: evidence.summary, webQueries: evidence.webQueries,
+  }, signal).catch((error) => {
     if (!signal.aborted) send("warning", { message: error.message });
     return null;
-  });
-  if (!routing || signal.aborted) return;
-  const approved = [...evidence.products, ...evidence.webQueries].filter((entry) => routing[entry.id] >= minimumYes);
+  }) : null;
+  if (signal.aborted) return;
+  const approved = [...evidence.products, ...evidence.webQueries.filter((entry) => routing?.[entry.id] >= minimumYes)];
   const reused = new Set();
   const matches = approved.map((entry) => {
     const prefetched = matchingPrefetch(entry, early);
@@ -203,8 +221,8 @@ async function runLookups(providers, evidence, result, moment, signal, send, ear
     if (compatible) reused.add(prefetched);
     return { entry, prefetched: compatible ? prefetched.task : null };
   });
-  const product = moment.amazonItem && approved.find((entry) => entry.kind === "shop" && entry.exact);
-  const currentAmazon = product ? { id: "amazon-item", kind: "shop" } : null;
+  const product = moment.amazonItem && evidence.products.find((entry) => entry.exact && entry.productPage);
+  const currentAmazon = product ? { id: "amazon-item", kind: "shop", title: product.title || product.name } : null;
   const links = matches.filter(({ prefetched }) => !prefetched).map(({ entry }) => lookupLink(entry));
   if (currentAmazon) links.unshift(currentAmazon);
   send("lookup", { links });
@@ -232,7 +250,8 @@ export async function inspectMoment(providers, moment, signal, send) {
       void providers.quickPlan(moment, signal).then((plan) => {
         if (signal.aborted || fullReady) return;
         const focus = sceneFocus(plan.focus);
-        send("preview", { sections: plan.sections, ...(focus ? { focus } : {}) });
+        const layout = plan.plan ?? sectionPlan(plan.sections);
+        send("preview", { sections: plan.sections, ...(layout.length ? { plan: layout } : {}), ...(focus ? { focus } : {}) });
         earlyTask = startEarlyLookups(providers, plan, moment, signal, send, early);
       }).catch(() => {});
     }
@@ -240,7 +259,8 @@ export async function inspectMoment(providers, moment, signal, send) {
     fullReady = true;
     const evidence = modelEvidence(result, moment);
     const focus = sceneFocus(result.focus);
-    send("context", { sections: normalizeSections(result.sections, 5), ...(focus ? { focus } : {}) });
+    const plan = result.plan ?? sectionPlan(result.sections);
+    send("context", { sections: normalizeSections(result.sections, 5), ...(plan.length ? { plan } : {}), ...(focus ? { focus } : {}) });
     await runLookups(providers, evidence, result, moment, signal, send, early);
     await earlyTask;
   } catch (error) {

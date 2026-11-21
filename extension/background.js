@@ -4,8 +4,12 @@ import { youtubeVideoId } from "./card-images.js";
 const panels = new Map();
 const jobs = new Map();
 const pausedTabs = new Set();
+const savedPauses = chrome.storage.session.get("pausedLookbackTabs").then(({ pausedLookbackTabs = [] }) => {
+  for (const id of pausedLookbackTabs) pausedTabs.add(id);
+}).catch(() => {});
 let recording = null;
 let lookbackChange = Promise.resolve();
+let activation = 0;
 
 const webTab = (tab) => tab?.id !== undefined && /^https?:/.test(tab.url || "");
 
@@ -55,20 +59,20 @@ async function activeTab(windowId) {
 }
 
 async function actualRecording() {
-  if (!recording) {
-    const captures = await chrome.tabCapture.getCapturedTabs();
-    const tabId = captures.find((capture) => capture.status === "active")?.tabId;
-    if (tabId !== undefined) {
-      const tab = await chrome.tabs.get(tabId).catch(() => null);
-      if (tab) recording = { tabId, windowId: tab.windowId };
-    }
-  }
+  if (!recording) recording = await recorder("status").catch(() => null);
   return recording;
 }
 
 function changeLookback(operation) {
-  lookbackChange = lookbackChange.catch(() => {}).then(operation);
+  lookbackChange = lookbackChange.catch(() => {}).then(() => savedPauses).then(operation);
   return lookbackChange;
+}
+
+async function setPaused(tabId, paused) {
+  if (pausedTabs.has(tabId) === paused) return;
+  if (paused) pausedTabs.add(tabId);
+  else pausedTabs.delete(tabId);
+  await chrome.storage.session.set({ pausedLookbackTabs: [...pausedTabs] });
 }
 
 async function stopLookback(session) {
@@ -80,12 +84,18 @@ async function stopLookback(session) {
 
 async function startLookback(tab) {
   const current = await actualRecording();
-  if (current?.tabId === tab.id) return;
+  const origin = new URL(tab.url).origin;
+  if (current?.tabId === tab.id && current.origin === origin) return;
   await stopLookback(current);
-  await ensureRecorder();
   const streamId = await chrome.tabCapture.getMediaStreamId({ targetTabId: tab.id });
-  await recorder("start", { streamId, tabId: tab.id });
-  recording = { tabId: tab.id, windowId: tab.windowId };
+  await ensureRecorder();
+  const [selected, window] = await Promise.all([activeTab(tab.windowId), chrome.windows.get(tab.windowId)]);
+  if (!window.focused || selected?.id !== tab.id || !webTab(selected) || new URL(selected.url).origin !== origin) {
+    throw new Error("The active tab changed before Lookback started.");
+  }
+  const session = { tabId: tab.id, windowId: tab.windowId, origin };
+  await recorder("start", { streamId, ...session });
+  recording = session;
   updateRecording(tab.windowId, true);
 }
 
@@ -94,11 +104,11 @@ function toggleLookback(tab) {
     if (!webTab(tab)) throw new Error("Lookback is available on regular web tabs.");
     const current = await actualRecording();
     if (current?.tabId === tab.id) {
-      pausedTabs.add(tab.id);
+      await setPaused(tab.id, true);
       await stopLookback(current);
       return false;
     }
-    pausedTabs.delete(tab.id);
+    await setPaused(tab.id, false);
     await startLookback(tab);
     return true;
   });
@@ -135,7 +145,7 @@ async function captureMoment(tab) {
   });
   try {
     await changeLookback(async () => {
-      pausedTabs.delete(tabId);
+      await setPaused(tabId, false);
       await startLookback(tab);
     });
     if (jobs.get(windowId) !== job) return;
@@ -210,13 +220,20 @@ function resetPanel(windowId) {
 }
 
 function followActiveTab(windowId, tabId) {
+  const request = ++activation;
   void changeLookback(async () => {
+    if (request !== activation) return;
+    if (windowId === chrome.windows.WINDOW_ID_NONE) {
+      await stopLookback(await actualRecording());
+      return;
+    }
+    const window = await chrome.windows.get(windowId).catch(() => null);
+    if (!window?.focused || request !== activation) return;
     const tab = await activeTab(windowId);
-    if (tabId !== undefined && tab?.id !== tabId) return;
+    if (request !== activation || (tabId !== undefined && tab?.id !== tabId)) return;
     const current = await actualRecording();
     if (current && current.tabId !== tab?.id) await stopLookback(current);
     if (webTab(tab) && !pausedTabs.has(tab.id)) {
-      // Previously invoked tabs can resume if Chrome still grants capture access.
       await startLookback(tab).catch(() => updateRecording(windowId, false));
     }
   }).catch(() => {});
@@ -227,21 +244,29 @@ chrome.tabs.onActivated.addListener(({ tabId, windowId }) => {
   followActiveTab(windowId, tabId);
 });
 chrome.tabs.onUpdated.addListener((tabId, change, tab) => {
+  if (change.status === "complete" && tab.active) {
+    void chrome.windows.get(tab.windowId).then((window) => {
+      if (window.focused) followActiveTab(tab.windowId, tabId);
+    }).catch(() => {});
+  }
   if (!change.url && change.status !== "loading") return;
   if (tab.active) resetPanel(tab.windowId);
   void changeLookback(async () => {
     const current = await actualRecording();
     if (current?.tabId !== tabId) return;
-    if (webTab(tab)) await recorder("reset", { tabId });
+    if (webTab(tab) && new URL(tab.url).origin === current.origin) await recorder("reset", { tabId });
     else await stopLookback(current);
   }).catch(() => {});
 });
 chrome.tabs.onRemoved.addListener((tabId) => {
-  pausedTabs.delete(tabId);
+  void changeLookback(() => setPaused(tabId, false)).catch(() => {});
 });
 chrome.windows.onFocusChanged.addListener((windowId) => {
-  if (windowId !== chrome.windows.WINDOW_ID_NONE) followActiveTab(windowId);
+  followActiveTab(windowId);
 });
+void chrome.windows.getLastFocused().then((window) => {
+  if (window.focused) followActiveTab(window.id);
+}).catch(() => {});
 chrome.windows.onRemoved.addListener((windowId) => {
   jobs.delete(windowId);
   panels.delete(windowId);

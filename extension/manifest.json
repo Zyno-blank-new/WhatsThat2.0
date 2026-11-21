@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "What’sThat?",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "description": "Get answers about what you just saw or heard in Chrome.",
   "minimum_chrome_version": "116",
   "permissions": ["activeTab", "sidePanel", "tabCapture", "offscreen", "storage"],

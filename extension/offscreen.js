@@ -46,13 +46,13 @@ function record(session) {
   recorder.start(200);
 }
 
-async function start({ streamId, tabId }) {
+async function start({ streamId, tabId, windowId, origin }) {
   await stop();
   const stream = await navigator.mediaDevices.getUserMedia({
     audio: options(streamId),
     video: options(streamId, { maxWidth: 1280, maxHeight: 720, maxFrameRate: 15 }),
   });
-  const session = { stream, tabId };
+  const session = { stream, tabId, windowId, origin };
   active = session;
   try {
     if (stream.getAudioTracks().length) {
@@ -119,6 +119,7 @@ chrome.runtime.onMessage.addListener((message, _sender, reply) => {
   if (message.target !== "recorder") return;
   const operations = {
     start: () => start(message),
+    status: () => active && { tabId: active.tabId, windowId: active.windowId, origin: active.origin },
     stop: () => stop(),
     snapshot: () => snapshot(message.tabId),
     reset: () => {

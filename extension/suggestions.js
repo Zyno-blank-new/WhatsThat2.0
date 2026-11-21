@@ -4,6 +4,19 @@ const vagueLabels = new Set([
   "what happened", "what you saw",
 ]);
 
+export const sectionRoles = ["context", "shopping", "recipe", "review", "video"];
+
+export function sectionPlan(sections) {
+  if (!Array.isArray(sections)) return [];
+  const seen = new Set();
+  return sections.slice(0, 4).flatMap((section) => {
+    const title = typeof section?.title === "string" ? section.title.trim().slice(0, 60) : "";
+    if (!title || seen.has(chipKey(title)) || !sectionRoles.includes(section.role)) return [];
+    seen.add(chipKey(title));
+    return [{ title, role: section.role }];
+  });
+}
+
 export function chipKey(value) {
   return value.normalize("NFKC").toLowerCase().replace(/(\d),(?=\d)/g, "$1")
     .replace(/\s+/g, " ").trim().replace(/[.?!]+$/, "");
@@ -33,8 +46,10 @@ export function normalizeSections(sections, limit, plan = false) {
       chips.push({ label, question, ...(answer ? { answer } : {}), ...(sourceQuery ? { sourceQuery } : {}) });
     }
     if (chips.length || plan) {
-      const layout = ["chips", "video", "link"].includes(section.layout) ? section.layout : "chips";
-      result.push(plan ? { title, layout, chips } : { title, chips });
+      const role = sectionRoles.includes(section.role) ? section.role : undefined;
+      const layout = ["chips", "video", "link"].includes(section.layout) ? section.layout
+        : role === "video" ? "video" : role && role !== "context" ? "link" : "chips";
+      result.push(plan ? { title, layout, chips, ...(role ? { role } : {}) } : { title, chips });
     }
   }
   return result;
