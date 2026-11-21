@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { answerMoment, inspectMoment } from "../extension/analysis.js";
-import { siteIcon, youtubeThumbnail, youtubeVideoId } from "../extension/card-images.js";
+import { landmarkPhoto, siteIcon, youtubeThumbnail, youtubeVideoId } from "../extension/card-images.js";
 import { createProviders } from "../extension/providers.js";
 import { amazonItemUrl, productPhotoKey } from "../extension/products.js";
 import { parseGeminiKeyFile } from "../extension/key-settings.js";
@@ -109,6 +109,8 @@ test("distinct foreground hats reach the catalog before full analysis and matchi
     quickPlan: async () => ({ sections: [], products, webQueries: [] }),
     analyze: () => promise,
     decide: async ({ products }) => Object.fromEntries(products.map(({ id }) => [id, 0.9])),
+    merchantListings: async () => ({ items: [] }),
+    verifyProducts: async (_product, items) => items,
     shop: async ({ name, description, id }) => {
       calls.push({ name, description, id });
       if (calls.length === 2) resolve({
@@ -121,7 +123,7 @@ test("distinct foreground hats reach the catalog before full analysis and matchi
   assert.deepEqual(calls, products.map(({ name, description }, index) => ({ name, description, id: "preview_catalog_" + index })));
   assert.deepEqual(events.filter(({ type, preview }) => type === "lookup" && preview).map(({ links }) => links[0].name),
     products.map(({ name }) => name));
-  assert.equal(events.filter(({ type }) => type === "shop").length, 2);
+  assert.equal(events.filter(({ type, items }) => type === "shop" && items.length).length, 2);
 });
 
 test("a full-analysis product can retry an early search with a more specific description", async () => {
@@ -132,6 +134,8 @@ test("a full-analysis product can retry an early search with a more specific des
     quickPlan: async () => ({ sections: [], products: [product], webQueries: [] }),
     analyze: () => promise,
     decide: async ({ products: [candidate] }) => ({ [candidate.id]: 0.9 }),
+    merchantListings: async () => ({ items: [] }),
+    verifyProducts: async (_product, items) => items,
     shop: async ({ description, id }) => {
       calls.push(description);
       if (id === "preview_catalog_0") {
@@ -145,6 +149,85 @@ test("a full-analysis product can retry an early search with a more specific des
   await inspectMoment(providers, moment, AbortSignal.timeout(1000), (type, value) => events.push({ type, ...value }));
   assert.deepEqual(calls, ["wide brim", "adjustable chin cord"]);
   assert.equal(events.find(({ type, items }) => type === "shop" && items.length).id, "catalog_0");
+});
+
+test("both shopping sources publish only verified items without waiting for the slower source", async () => {
+  const product = { name: "Straw sun hat", description: "wide brim", evidence: "Worn by the speaker." };
+  const catalogHat = { title: "Wide-brim straw sun hat", url: "https://example.com/products/hat" };
+  const toy = { title: "Speaker's branded toy", url: "https://example.com/products/toy" };
+  const webHat = { title: "Woven straw sun hat", url: "https://elsewhere.example/products/hat" };
+  const { promise, resolve } = Promise.withResolvers();
+  const events = [];
+  const providers = {
+    analyze: async () => ({ sections: [], products: [product], webQueries: [] }),
+    decide: async () => ({ catalog_0: 0.9 }),
+    shop: async () => ({ items: [catalogHat, toy] }),
+    merchantListings: () => promise,
+    verifyProducts: async (_target, items) => items.filter((item) => item !== toy),
+  };
+  await inspectMoment(providers, moment, new AbortController().signal, (type, value) => {
+    events.push({ type, ...value });
+    if (value?.source === "shop") resolve({ items: [webHat] });
+  });
+  assert.deepEqual(events.filter(({ source }) => source).map(({ source, items }) => [source, items]), [
+    ["shop", [catalogHat]], ["merchantListings", [webHat]],
+  ]);
+  assert.equal(events.at(-2).complete, true);
+});
+
+test("a landmark visit adds a related video search and a product detail page adds independent reviews", async () => {
+  const place = {
+    title: "Visit", label: "Book tickets", kind: "visit", query: "Giza Plateau official tickets",
+    subject: "Giza Plateau", evidence: "The clip shows the named site.",
+  };
+  const product = {
+    name: "Sony WH-1000XM5", description: "over-ear headphones", exact: true, productPage: true, evidence: "The model and the Add to cart button are visible.",
+  };
+  const candidates = [];
+  const links = [];
+  const providers = {
+    analyze: async () => ({ sections: [], products: [product], webQueries: [place] }),
+    decide: async ({ webQueries }) => Object.fromEntries(webQueries.map(({ id }) => [id, 1])),
+    search: async (candidate) => {
+      candidates.push(candidate);
+      return { destinations: [] };
+    },
+  };
+  await inspectMoment(providers, { ...moment, videoId: "ABCDEFGHIJK" }, new AbortController().signal, (type, value) => {
+    if (type === "lookup") links.push(...value.links);
+  });
+  assert.deepEqual(candidates.map(({ kind }) => kind), ["review", "visit", "video"]);
+  assert.match(candidates[0].query, /Sony WH-1000XM5 .*reviews/);
+  assert.equal(candidates[2].subject, "Giza Plateau");
+  assert.equal(candidates[2].excludeVideoId, "ABCDEFGHIJK");
+  assert.equal(links.find(({ kind }) => kind === "visit").subject, "Giza Plateau");
+});
+
+test("alternate model spelling does not start a second review or shopping search", async () => {
+  const { promise, resolve } = Promise.withResolvers();
+  const primary = {
+    name: "Sony WH-1000XM5 Noise Canceling Headphones", exact: true, productPage: true,
+    evidence: "The model and add-to-cart button are visible.",
+  };
+  const calls = [];
+  const providers = {
+    quickPlan: async () => ({ sections: [], products: [primary], webQueries: [] }),
+    analyze: () => promise,
+    decide: async ({ products, webQueries }) => Object.fromEntries([...products, ...webQueries].map(({ id }) => [id, 1])),
+    search: async ({ id }) => {
+      calls.push(id);
+      resolve({ sections: [], products: [{ ...primary, name: "Sony WH1000XM5 Wireless Headphones" }], webQueries: [] });
+      return { destinations: [{ url: "https://reviews.example/sony-xm5" }] };
+    },
+    shop: async ({ id }) => {
+      calls.push(id);
+      return { items: [{ title: primary.name, url: "https://shop.example/products/sony-xm5" }] };
+    },
+    merchantListings: async () => ({ items: [] }),
+    verifyProducts: async (_product, items) => items,
+  };
+  await inspectMoment(providers, moment, new AbortController().signal, () => {});
+  assert.deepEqual(calls.sort(), ["preview_catalog_0", "preview_reviews"]);
 });
 
 test("chip answers use the video to give explanations and can request public verification", async () => {
@@ -247,7 +330,7 @@ test("lookup sections and chip labels come from the model and gated searches rou
   events.length = 0;
   await inspectMoment(providers, { ...moment, amazonItem }, signal, send);
   assert.deepEqual(events.find(({ id }) => id === "amazon-item"), {
-    type: "shop", id: "amazon-item", visual,
+    type: "shop", id: "amazon-item", visual, complete: true,
     items: [{ title: product.name, url: amazonItem, merchant: "amazon.com" }],
   });
 });
@@ -297,7 +380,7 @@ test("Decision 1 and Neon use separate operations, with grounded sources preserv
     if (url.endsWith("/decisions")) {
       assert.equal(request.model, "gemini-decision-1");
       assert.deepEqual(Object.keys(request.questions), ["catalog_0", "web_0", "web_1"]);
-      assert.match(request.questions.catalog_0.instructions, /wear, carry, or use in the foreground/);
+      assert.match(request.questions.catalog_0.instructions, /worn, carried, or used in the foreground/);
       assert.match(request.questions.web_1.instructions, /only lookup web_1/);
       assert.match(request.questions.web_1.instructions, /recipe.*featured dish/);
       return Response.json({ answers: { catalog_0: { noul: 0.9 }, web_0: { noul: 0.8 }, web_1: { noul: 0.1 } } });
@@ -369,6 +452,69 @@ test("card artwork is scoped to the exact video or a public site icon", () => {
   assert.equal(youtubeThumbnail(id), "https://i.ytimg.com/vi/spUNpyF58BY/mqdefault.jpg");
   assert.equal(siteIcon("wikipedia.org"), "https://wikipedia.org/favicon.ico");
   assert.equal(siteIcon("app.internal"), null);
+});
+
+test("landmark artwork uses a matching Commons photo and credit", async () => {
+  const subject = "Giza Pyramids";
+  const response = await landmarkPhoto(subject, new AbortController().signal, async (url) => {
+    assert.equal(url.origin, "https://en.wikipedia.org");
+    assert.equal(url.searchParams.get("gsrsearch"), subject);
+    assert.equal(url.searchParams.get("pilicense"), "free");
+    return Response.json({ query: { pages: [
+      { index: 1, title: "Pyramid of Unas", pageimage: "Wrong.jpg", thumbnail: { source: "https://upload.wikimedia.org/wikipedia/commons/thumb/Wrong.jpg" } },
+      { index: 2, title: "Giza pyramid complex", pageimage: "Giza.jpg", thumbnail: { source: "https://thumb.wikimedia.org/wikipedia/commons/thumb/Giza.jpg" } },
+    ] } });
+  });
+  assert.deepEqual(response, {
+    src: "https://thumb.wikimedia.org/wikipedia/commons/thumb/Giza.jpg",
+    credit: "https://commons.wikimedia.org/wiki/File:Giza.jpg",
+  });
+});
+
+test("review summaries and cards require citations to specific review pages", async () => {
+  const summary = "Summary: Reviewers liked the noise cancellation but found the case bulky.";
+  const review = "Headphone Lab review | Tested the noise cancellation and measured battery life.";
+  const listing = "Store results | Retail category.";
+  const url = "https://reviewlab.example/reviews/sony-xm5";
+  const text = [summary, review, listing].join("\n");
+  const annotations = [[summary, url], [review, url], [listing, "https://store.example/collections/headphones"]].map(([line, url]) => ({
+    type: "url_citation", url, start_index: text.indexOf(line), end_index: text.indexOf(line) + line.length,
+  }));
+  const providers = createProviders({ apiKey: "test-key", fetcher: async () => Response.json({ steps: [
+    { type: "google_search_result", result: [] },
+    { type: "model_output", content: [{ type: "text", text, annotations }] },
+  ] }) });
+  const result = await providers.search({ kind: "review", query: "Sony WH-1000XM5 independent reviews" }, new AbortController().signal);
+  assert.equal(result.summary, summary.slice("Summary: ".length));
+  assert.deepEqual(result.destinations.map((item) => item.url), [url]);
+});
+
+test("web shopping accepts direct retailer product pages and checks their relevance in Decisions", async () => {
+  const lines = ["Headphone category | Browse models.", "Sony WH-1000XM5 | Black color.",
+    "Sony WH-1000XM5 case | Hard carrying case."];
+  const urls = ["https://www.amazon.com/s?k=Xm5", "https://www.amazon.com/dp/B09XS7JWHH", "https://shop.example/products/xm5-case"];
+  const text = lines.join("\n");
+  const annotations = lines.map((line, index) => ({
+    type: "url_citation", url: urls[index], start_index: text.indexOf(line), end_index: text.indexOf(line) + line.length,
+  }));
+  const product = { name: "Sony WH-1000XM5", description: "Black color", exact: true, evidence: "Model label is readable." };
+  const providers = createProviders({ apiKey: "test-key", fetcher: async (url, options) => {
+    const payload = JSON.parse(options.body);
+    if (url.endsWith("decisions")) {
+      assert.deepEqual(Object.keys(payload.questions), ["listing_0", "listing_1"]);
+      assert.match(payload.input, /Hard carrying case/);
+      return Response.json({ answers: { listing_0: { noul: 0.95 }, listing_1: { noul: 0.12 } } });
+    }
+    assert.match(payload.input, /Sony WH-1000XM5 Black color/);
+    return Response.json({ steps: [
+      { type: "google_search_result", result: [] },
+      { type: "model_output", content: [{ type: "text", text, annotations }] },
+    ] });
+  } });
+  const signal = new AbortController().signal;
+  const { items } = await providers.merchantListings(product, signal);
+  assert.deepEqual(items.map((item) => item.url), urls.slice(1));
+  assert.deepEqual((await providers.verifyProducts(product, items, signal)).map((item) => item.url), [urls[1]]);
 });
 
 test("without a valid grounding citation, prose and generic URLs cannot become action links", async () => {

@@ -5,7 +5,7 @@
   "description": "Get answers about what you just saw or heard in Chrome.",
   "minimum_chrome_version": "116",
   "permissions": ["activeTab", "sidePanel", "tabCapture", "offscreen", "storage"],
-  "host_permissions": ["https://generativelanguage.googleapis.com/*", "https://catalog.shopify.com/*"],
+  "host_permissions": ["https://generativelanguage.googleapis.com/*", "https://catalog.shopify.com/*", "https://en.wikipedia.org/*"],
   "background": { "service_worker": "background.js", "type": "module" },
   "action": { "default_title": "Ask about this moment" },
   "side_panel": { "default_path": "panel.html" },

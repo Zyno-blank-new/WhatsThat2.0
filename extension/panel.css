@@ -96,9 +96,10 @@ kbd { display: grid; place-items: center; min-width: 28px; height: 27px; border:
 .product-grid, .destinations { display: grid; gap: 7px; }
 .destination { display: grid; grid-template-columns: 30px minmax(0, 1fr) 13px; gap: 9px; align-items: start; padding: 10px; background: var(--card); border: 1px solid var(--line); border-radius: 11px; text-decoration: none; overflow-wrap: anywhere; }
 .destination:is(:hover, :focus-visible) { background: #151b29; border-color: #48689b; }
-.destination-video { grid-template-columns: 68px minmax(0, 1fr) 13px; }
+.destination-media { grid-template-columns: 68px minmax(0, 1fr) 13px; }
 .destination-icon { position: relative; display: grid; place-items: center; width: 30px; height: 30px; border-radius: 7px; overflow: hidden; background: #192338; color: var(--accent); }
 .destination-preview { width: 68px; height: 42px; }
+.destination-place { width: 68px; height: 48px; }
 .destination-preview::before { content: ""; border-left: 8px solid currentColor; border-top: 5px solid transparent; border-bottom: 5px solid transparent; }
 .destination-document::before { content: ""; width: 10px; height: 12px; border: 1px solid currentColor; border-radius: 2px; background: linear-gradient(currentColor, currentColor) center 4px / 4px 1px no-repeat, linear-gradient(currentColor, currentColor) center 7px / 4px 1px no-repeat; }
 .destination-copy { display: grid; gap: 3px; min-width: 0; }
@@ -117,6 +118,9 @@ kbd { display: grid; place-items: center; min-width: 28px; height: 27px; border:
 .product-placeholder::before { content: ""; width: 15px; height: 14px; border: 1px solid currentColor; border-radius: 2px 2px 4px 4px; background: radial-gradient(ellipse at 50% 0, transparent 36%, currentColor 40% 48%, transparent 54%) center top / 9px 7px no-repeat; }
 .destination-icon img, .product-placeholder img { position: absolute; inset: 0; margin: auto; width: 55%; height: 55%; object-fit: contain; opacity: 0; }
 .destination-preview img { width: 100%; height: 100%; object-fit: cover; }
+.destination-place img.landmark-image { width: 100%; height: 100%; object-fit: cover; }
+.image-credit { display: inline-block; margin-top: 5px; color: var(--muted); font-size: 10px; }
+.review-summary { margin: 0 0 8px; color: var(--ink); font-size: 13px; line-height: 1.45; }
 .has-image > img { opacity: 1; }
 .has-image::before { visibility: hidden; }
 .product-name { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; font-size: 12px; line-height: 1.25; font-weight: 670; }

@@ -46,3 +46,45 @@ export function siteIcon(site) {
   return /^(?:[a-z0-9-]+\.)+[a-z]{2,}$/.test(host) && !/\.(internal|local|localhost|test|example|invalid)$/.test(host)
     ? "https://" + host + "/favicon.ico" : null;
 }
+
+function placeWords(value) {
+  return new Set(value.normalize("NFKD").toLowerCase().replace(/\p{Mark}/gu, "")
+    .match(/[\p{L}\p{N}]+/gu)?.filter((word) => !["a", "in", "of", "the"].includes(word))
+    .map((word) => word.length > 4 ? word.replace(/s$/, "") : word));
+}
+
+export async function landmarkPhoto(subject, signal, fetcher = fetch) {
+  const words = placeWords(subject);
+  if (!words.size) return null;
+  const endpoint = new URL("https://en.wikipedia.org/w/api.php");
+  endpoint.search = new URLSearchParams({
+    action: "query", format: "json", formatversion: "2", generator: "search",
+    gsrsearch: subject, gsrnamespace: "0", gsrlimit: "4", prop: "pageimages",
+    piprop: "thumbnail|name", pithumbsize: "240", pilicense: "free", origin: "*",
+  });
+  try {
+    const response = await fetcher(endpoint, {
+      credentials: "omit", referrerPolicy: "no-referrer", priority: "low",
+      headers: { "Api-User-Agent": "WhatsThat/2.0 (https://github.com/Zyno-blank-new/WhatsThat2.0)" },
+      signal: AbortSignal.any([signal, AbortSignal.timeout(4000)]),
+    });
+    if (!response.ok) return null;
+    const data = await response.json();
+    const pages = data.query?.pages ?? [];
+    for (const page of pages.sort((first, second) => first.index - second.index)) {
+      const title = placeWords(page.title);
+      const shared = [...words].filter((word) => title.has(word)).length;
+      if (shared < Math.ceil(words.size * 0.7) || !page.pageimage || !page.thumbnail?.source) continue;
+      const image = new URL(page.thumbnail.source);
+      if (!["https://upload.wikimedia.org", "https://thumb.wikimedia.org"].includes(image.origin) ||
+          !image.pathname.startsWith("/wikipedia/commons/")) continue;
+      return {
+        src: image.href,
+        credit: "https://commons.wikimedia.org/wiki/File:" + encodeURIComponent(page.pageimage.replaceAll(" ", "_")),
+      };
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}

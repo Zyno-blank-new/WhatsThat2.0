@@ -1,5 +1,5 @@
 import { answerMoment, inspectMoment, plainAnswer, verifyAnswer } from "./analysis.js";
-import { matchingVideoThumbnail, siteIcon, youtubeThumbnail, youtubeVideoId } from "./card-images.js";
+import { landmarkPhoto, matchingVideoThumbnail, siteIcon, youtubeThumbnail, youtubeVideoId } from "./card-images.js";
 import { productThumbnail } from "./clip-image.js";
 import { getGeminiKey, setupKeySettings } from "./key-settings.js";
 import { createProviders } from "./providers.js";
@@ -29,6 +29,8 @@ const chipGroups = new Map();
 const chipEntries = new Map();
 const lookupEntries = new Map();
 const productUrls = new Set();
+const webProductTitles = new Set();
+const shownVideos = new Set();
 const catalogImages = new Map();
 const pendingProductImages = new Map();
 let port;
@@ -119,6 +121,8 @@ function stopTask() {
   chipEntries.clear();
   lookupEntries.clear();
   productUrls.clear();
+  webProductTitles.clear();
+  shownVideos.clear();
   catalogImages.clear();
   pendingProductImages.clear();
   ui.sections.replaceChildren(ui.products);
@@ -331,7 +335,7 @@ async function refineSuggestions(providers, value, signal) {
 }
 
 function mountLookups(links) {
-  for (const { id, title, label, kind, name, exact } of links) {
+  for (const { id, title, label, kind, name, exact, subject } of links) {
     if (kind === "shop") {
       const body = make("div", "product-results");
       showPending(body, "Looking up products…");
@@ -343,17 +347,19 @@ function mountLookups(links) {
       lookupEntries.set(id, body);
       continue;
     }
-    const group = getGroup(title);
+    const group = getGroup(title, kind === "review");
     clearPlannedGroup(group);
     const inline = kind !== "answer";
     const body = make("div", inline ? "lookup-inline" : "lookup-body");
     body.setAttribute("role", "status");
     if (inline) {
       body.dataset.kind = kind;
+      if (kind === "review") body.dataset.reviewId = id;
+      if (subject) body.dataset.subject = subject;
       const card = make("div", "skeleton-card");
       const lines = make("span", "skeleton-lines");
       card.setAttribute("aria-hidden", "true");
-      if (kind === "video") card.append(make("span", "skeleton skeleton-thumbnail"));
+      if (kind === "video" || kind === "visit") card.append(make("span", "skeleton skeleton-thumbnail"));
       lines.append(make("span", "skeleton"), make("span", "skeleton"));
       card.append(lines);
       body.setAttribute("aria-busy", "true");
@@ -376,28 +382,32 @@ function finishLookup(id) {
   return body;
 }
 
-function showShop({ id, items, warnings = [], visual }) {
-  const block = finishLookup(id);
+function showShop({ id, items, source, complete, suggestions, visual }) {
+  const block = lookupEntries.get(id);
   if (!block) return;
-  const catalog = id !== "amazon-item";
+  const catalog = source === "shop";
   const isFirstProduct = !productUrls.size;
-  const grid = make("div", "product-grid");
+  const existingGrid = block.querySelector(".product-grid");
+  const grid = existingGrid || make("div", "product-grid");
   const placeholders = [];
   for (const item of items) {
     const card = link(item.url, "product");
     if (!card || productUrls.has(card.href)) continue;
-    productUrls.add(card.href);
-    const source = externalUrl(item.image);
     const photoKey = productPhotoKey(item.title);
-    if (catalog && photoKey && source) catalogImages.set(photoKey, source);
+    const webTitle = source === "merchantListings" && photoKey && item.merchant + ":" + photoKey;
+    if (webTitle && webProductTitles.has(webTitle)) continue;
+    if (webTitle) webProductTitles.add(webTitle);
+    productUrls.add(card.href);
+    const photo = externalUrl(item.image);
+    if (catalog && photoKey && photo) catalogImages.set(photoKey, photo);
     const placeholder = make("span", "product-placeholder");
     placeholder.setAttribute("aria-hidden", "true");
-    if (!source) addCardImage(placeholder, siteIcon(item.merchant) || siteIcon(new URL(card.href).hostname));
-    if (!source && !catalog) {
+    if (!photo) addCardImage(placeholder, siteIcon(item.merchant) || siteIcon(new URL(card.href).hostname));
+    if (!photo && !catalog) {
       if (photoKey) pendingProductImages.set(placeholder, photoKey);
       if (visual) placeholders.push(placeholder);
     }
-    const image = source ? makeProductImage(source, placeholder) : placeholder;
+    const image = photo ? makeProductImage(photo, placeholder) : placeholder;
     const copy = make("span");
     copy.append(make("span", "product-name", item.title),
       make("span", "product-meta", [item.price, item.merchant || new URL(card.href).hostname].filter(Boolean).join(" · ")));
@@ -406,13 +416,17 @@ function showShop({ id, items, warnings = [], visual }) {
     card.append(image, copy, arrow);
     grid.append(card);
   }
-  if (grid.children.length) {
+  if (grid.children.length && !existingGrid) {
+    finishLookup(id);
     if (block.dataset.heading) block.append(make("h3", "product-group-name", block.dataset.heading));
     block.append(grid);
     if (isFirstProduct && moment) console.info("What’sThat? first product card", (Date.now() - moment.capturedAt) + " ms");
   }
-  for (const message of warnings) block.append(make("p", "notice", message));
-  if (!block.children.length) block.remove();
+  if (grid.children.length && suggestions?.length) appendSearchSuggestions(block, suggestions);
+  if (complete && !grid.children.length) {
+    block.remove();
+    lookupEntries.delete(id);
+  }
   updateProducts();
 
   fillProductImages();
@@ -452,11 +466,18 @@ function showDestinations(block, destinations) {
   const list = make("div", "destinations");
   const kind = block.dataset.kind;
   const video = kind === "video";
-  const type = { paper: "Research paper", person: "Biography", video: "Video", visit: "Visitor information", order: "Ordering page" }[kind];
+  const place = kind === "visit";
+  const imageHolders = [];
+  const type = { paper: "Research paper", person: "Biography", video: "Video", visit: "Visitor information", review: "Review", order: "Ordering page" }[kind];
   for (const { title, reason, url, site, videoUrl } of destinations) {
-    const card = link(url, video ? "destination destination-video" : "destination");
+    const videoKey = video && (youtubeVideoId(url) || youtubeVideoId(videoUrl) || url);
+    if (videoKey && shownVideos.has(videoKey)) continue;
+    const card = link(url, video ? "destination destination-media destination-video"
+      : place ? "destination destination-media" : "destination");
     if (!card) continue;
-    const icon = make("span", video ? "destination-icon destination-preview" : "destination-icon destination-document");
+    if (videoKey) shownVideos.add(videoKey);
+    const icon = make("span", video ? "destination-icon destination-preview"
+      : place ? "destination-icon destination-place destination-document" : "destination-icon destination-document");
     icon.setAttribute("aria-hidden", "true");
     if (video) {
       const videoId = youtubeVideoId(url);
@@ -468,6 +489,7 @@ function showDestinations(block, destinations) {
       }
     } else {
       addCardImage(icon, siteIcon(site));
+      if (place) imageHolders.push(icon);
     }
     const copy = make("span", "destination-copy");
     const meta = make("span", "destination-meta");
@@ -481,12 +503,20 @@ function showDestinations(block, destinations) {
     list.append(card);
   }
   if (list.children.length) block.append(list);
+  if (imageHolders.length && block.dataset.subject && controller) {
+    void landmarkPhoto(block.dataset.subject, controller.signal).then((photo) => {
+      if (!photo || !list.isConnected) return;
+      for (const icon of imageHolders) addCardImage(icon, photo.src, "landmark-image");
+      const credit = link(photo.credit, "image-credit", "Photo credit · Wikimedia Commons");
+      if (credit) list.after(credit);
+    });
+  }
   return Boolean(list.children.length);
 }
 
-function addCardImage(icon, url) {
+function addCardImage(icon, url, className) {
   if (!url) return;
-  const image = make("img");
+  const image = make("img", className);
   image.alt = "";
   image.loading = "lazy";
   image.referrerPolicy = "no-referrer";
@@ -496,12 +526,28 @@ function addCardImage(icon, url) {
   icon.append(image);
 }
 
-function showWeb({ id, blocks, destinations, suggestions, searched }) {
+function showWeb({ id, blocks, destinations, suggestions, searched, summary }) {
   const block = finishLookup(id);
   if (!block) return;
   if (destinations) {
+    const review = block.dataset.kind === "review";
+    if (review && id === "preview_reviews" && block.parentElement.querySelector('[data-review-id="product_reviews"][data-has-results]')) {
+      block.remove();
+      lookupEntries.delete(id);
+      return;
+    }
+    if (summary && review) block.append(make("p", "review-summary", summary));
     if (showDestinations(block, destinations)) {
+      if (review) {
+        block.dataset.hasResults = "";
+        if (id === "product_reviews") {
+          lookupEntries.get("preview_reviews")?.remove();
+          lookupEntries.delete("preview_reviews");
+        }
+      }
       appendSearchSuggestions(block, suggestions);
+    } else if (review && !block.parentElement.querySelector("[data-has-results]")) {
+      block.append(make("p", "results-empty", "No independent reviews found for this model."));
     } else {
       block.remove();
       lookupEntries.delete(id);
@@ -659,7 +705,7 @@ function begin(job) {
   if (moment?.id === job.id) return;
   stopTask();
   preview(job);
-  moment = { id: job.id, capturedAt: job.capturedAt, clip: job.clip, amazonItem: job.amazonItem };
+  moment = { id: job.id, capturedAt: job.capturedAt, clip: job.clip, amazonItem: job.amazonItem, videoId: job.videoId };
   ui.question.disabled = false;
   ui.clip.src = job.clip.video;
   ui.preview.hidden = false;
