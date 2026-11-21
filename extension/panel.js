@@ -19,6 +19,8 @@ let moment = null;
 let controller = null;
 let recent = [];
 let renderedChip = false;
+let sectionsPending = false;
+let routingPending = false;
 const chipGroups = new Map();
 const chipEntries = new Map();
 const lookupEntries = new Map();
@@ -56,7 +58,26 @@ function setStatus(message, style = "") {
   ui.status.textContent = message || "";
   ui.status.className = "status";
   if (style) ui.status.classList.add(style === "busy" ? "visually-hidden" : style);
-  ui.skeleton.hidden = style !== "busy" || renderedChip;
+}
+
+function updateSkeletons() {
+  ui.skeleton.hidden = !sectionsPending && !routingPending;
+  const filled = Math.min(ui.sections.children.length, ui.skeleton.children.length - 1);
+  for (const [index, row] of [...ui.skeleton.children].entries()) row.hidden = index < filled;
+}
+
+function startLoading(message) {
+  sectionsPending = true;
+  routingPending = true;
+  setStatus(message, "busy");
+  updateSkeletons();
+}
+
+function analysisError(message) {
+  sectionsPending = false;
+  routingPending = false;
+  setStatus(message, "error");
+  updateSkeletons();
 }
 
 function setNotice(message, error = false) {
@@ -71,6 +92,8 @@ function stopTask() {
   moment = null;
   recent = [];
   renderedChip = false;
+  sectionsPending = false;
+  routingPending = false;
   chipGroups.clear();
   chipEntries.clear();
   lookupEntries.clear();
@@ -88,6 +111,7 @@ function stopTask() {
   ui.preview.textContent = "View clip";
   setStatus();
   setNotice();
+  updateSkeletons();
 }
 
 function preview(job) {
@@ -97,7 +121,7 @@ function preview(job) {
   ui.source.textContent = job.host;
 }
 
-function getGroup(title) {
+function getGroup(title, explanation = false) {
   const key = title.toLowerCase();
   let group = chipGroups.get(key);
   if (!group) {
@@ -108,7 +132,10 @@ function getGroup(title) {
     group.answer.hidden = true;
     group.answer.setAttribute("role", "status");
     group.block.append(make("h2", "", title), group.chips, group.answer, group.lookups);
-    ui.sections.append(group.block);
+    const firstLookupGroup = explanation
+      ? [...chipGroups.values()].find((entry) => !entry.chips.children.length)?.block
+      : null;
+    ui.sections.insertBefore(group.block, firstLookupGroup ?? null);
     chipGroups.set(key, group);
   }
   return group;
@@ -160,7 +187,7 @@ function showSections(sections) {
       const key = chipKey(label);
       const questionKey = chipKey(question);
       if (!key || chipEntries.has(key) || [...chipEntries.values()].some((entry) => entry.questionKey === questionKey)) continue;
-      const group = getGroup(title);
+      const group = getGroup(title, true);
       const item = { label, question };
       const trigger = make("button", "chip", label);
       trigger.type = "button";
@@ -181,10 +208,10 @@ function showSections(sections) {
   }
   if (chipEntries.size && !renderedChip && moment) {
     renderedChip = true;
-    ui.skeleton.hidden = true;
     const elapsedMs = Date.now() - moment.capturedAt;
     console.info("What’sThat? first clickable chip", elapsedMs + " ms");
   }
+  updateSkeletons();
 }
 
 function replaceSuggestions(sections) {
@@ -219,14 +246,28 @@ async function refineSuggestions(providers, value, signal) {
 }
 
 function mountLookups(links) {
-  for (const { id, title, label } of links) {
+  for (const { id, title, label, kind } of links) {
     const group = getGroup(title);
-    const details = make("details", "lookup");
-    const body = make("div", "lookup-body");
+    const inline = kind !== "shop" && kind !== "answer";
+    const body = make("div", inline ? "lookup-inline" : "lookup-body");
     body.setAttribute("role", "status");
-    showPending(body, "Looking up results…");
-    details.append(make("summary", "chip", label), body);
-    group.lookups.append(details);
+    if (inline) {
+      body.dataset.kind = kind;
+      const card = make("div", "skeleton-card");
+      const lines = make("span", "skeleton-lines");
+      card.setAttribute("aria-hidden", "true");
+      if (kind === "video") card.append(make("span", "skeleton skeleton-thumbnail"));
+      lines.append(make("span", "skeleton"), make("span", "skeleton"));
+      card.append(lines);
+      body.setAttribute("aria-busy", "true");
+      body.append(make("span", "visually-hidden", "Looking up " + label), card);
+      group.lookups.append(body);
+    } else {
+      const details = make("details", "lookup");
+      showPending(body, "Looking up results…");
+      details.append(make("summary", "chip", label), body);
+      group.lookups.append(details);
+    }
     lookupEntries.set(id, body);
   }
 }
@@ -267,9 +308,15 @@ function showShop({ id, items, warnings }) {
 
 function showDestinations(block, destinations) {
   const list = make("div", "destinations");
+  const video = block.dataset.kind === "video";
   for (const { title, reason, url, site } of destinations) {
-    const card = link(url, "destination");
+    const card = link(url, video ? "destination destination-video" : "destination");
     if (!card) continue;
+    if (video) {
+      const preview = make("span", "destination-preview");
+      preview.setAttribute("aria-hidden", "true");
+      card.append(preview);
+    }
     const copy = make("span", "destination-copy");
     copy.append(make("span", "destination-title", title),
       make("span", "destination-site", site), make("span", "destination-reason", reason));
@@ -279,22 +326,20 @@ function showDestinations(block, destinations) {
     list.append(card);
   }
   if (list.children.length) block.append(list);
-  else block.append(make("p", "results-empty", "No matching destination found."));
+  return Boolean(list.children.length);
 }
 
 function showWeb({ id, blocks, destinations, suggestions, searched }) {
   const block = finishLookup(id);
   if (!block) return;
   if (destinations) {
-    const lookup = block.parentElement;
-    if (!destinations.length && !lookup.open && !lookup.contains(document.activeElement)) {
-      lookup.remove();
+    if (showDestinations(block, destinations)) {
+      appendSearchSuggestions(block, suggestions);
+    } else {
+      block.remove();
       lookupEntries.delete(id);
       pruneEmptyGroups();
-      return;
     }
-    showDestinations(block, destinations);
-    if (destinations.length) appendSearchSuggestions(block, suggestions);
     return;
   }
   if (!blocks.length || !searched) {
@@ -341,13 +386,16 @@ function appendSearchSuggestions(block, suggestions) {
 
 function receiveAnalysis(event) {
   if (event.type === "context") {
+    sectionsPending = false;
     if (event.sections.length) replaceSuggestions(event.sections);
-    if (!event.sections.length && !ui.sections.children.length) setStatus("There was too little context for specific suggestions.");
-    else setStatus();
+    if (!routingPending) setStatus();
+    updateSkeletons();
   }
   if (event.type === "lookup") {
+    routingPending = false;
     mountLookups(event.links);
     setStatus();
+    updateSkeletons();
   }
   if (event.type === "shop") showShop(event);
   if (event.type === "web") showWeb(event);
@@ -355,7 +403,14 @@ function receiveAnalysis(event) {
     if (event.id) finishLookup(event.id)?.append(make("p", "notice error", event.message));
     else setNotice(event.message, true);
   }
-  if (event.type === "error") setStatus(event.error, "error");
+  if (event.type === "error") analysisError(event.error);
+  if (event.type === "done") {
+    routingPending = false;
+    if (!sectionsPending && !ui.status.classList.contains("error")) {
+      setStatus(ui.sections.children.length ? undefined : "There was too little context for specific suggestions.");
+    }
+    updateSkeletons();
+  }
 }
 
 async function consumeAnalysis(snapshot, signal) {
@@ -363,7 +418,7 @@ async function consumeAnalysis(snapshot, signal) {
     const apiKey = await getGeminiKey();
     if (signal.aborted) return;
     if (!apiKey) {
-      setStatus("Save your Gemini API key in Settings, then press the shortcut again.", "error");
+      analysisError("Save your Gemini API key in Settings, then press the shortcut again.");
       return;
     }
     const providers = createProviders({ apiKey });
@@ -371,7 +426,7 @@ async function consumeAnalysis(snapshot, signal) {
     void providers.quickChips(snapshot, signal).then((sections) => {
       if (signal.aborted || fullAnalysisReady || !sections.length) return;
       replaceSuggestions(sections);
-      if (ui.status.textContent === "Finding suggestions…") setStatus();
+      if (!sectionsPending && !routingPending && !ui.status.classList.contains("error")) setStatus();
     }).catch(() => {
       // Hydrogen can still supply chips when the quick request fails.
     });
@@ -386,7 +441,7 @@ async function consumeAnalysis(snapshot, signal) {
       receiveAnalysis({ type, ...value });
     });
   } catch (error) {
-    if (!signal.aborted) setStatus(error.message, "error");
+    if (!signal.aborted) analysisError(error.message);
   }
 }
 
@@ -403,7 +458,7 @@ function begin(job) {
     setNotice("Lookback just started. This first clip is shorter.");
   }
   controller = new AbortController();
-  setStatus("Finding suggestions…", "busy");
+  startLoading("Finding suggestions…");
   void consumeAnalysis(moment, controller.signal);
 }
 
@@ -420,12 +475,12 @@ function connect() {
     if (event.type === "capturing") {
       stopTask();
       preview(event.job);
-      setStatus("Capturing this moment…", "busy");
+      startLoading("Capturing this moment…");
     }
     if (event.type === "captured") begin(event.job);
     if (event.type === "recording") recordingState(event.enabled, event.error);
-    if (event.type === "error") setStatus(event.error, "error");
-    if (event.type === "panel-warning" && !moment) setStatus(event.message, "error");
+    if (event.type === "error") analysisError(event.error);
+    if (event.type === "panel-warning" && !moment) analysisError(event.message);
     if (event.type === "reset") {
       stopTask();
       ui.capture.hidden = true;
@@ -437,7 +492,11 @@ function connect() {
 }
 connect();
 setupKeySettings((hasKey) => {
-  if (!hasKey) controller?.abort();
+  if (!hasKey && controller) {
+    stopTask();
+    ui.capture.hidden = true;
+    ui.empty.hidden = false;
+  }
   if (!hasKey || ui.status.classList.contains("error")) {
     setStatus(hasKey ? "Key saved. Press the shortcut to analyze." : "Set a Gemini API key to analyze this tab.");
   }

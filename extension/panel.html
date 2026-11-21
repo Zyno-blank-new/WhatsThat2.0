@@ -39,17 +39,30 @@
     </section>
     <div id="status" class="status" role="status" hidden></div>
     <div id="recording-note" class="notice" hidden></div>
-    <div id="suggestion-skeleton" class="suggestion-skeleton" aria-hidden="true" hidden>
+    <div id="sections"></div>
+    <div id="suggestion-skeleton" aria-hidden="true" hidden>
+      <div class="skeleton-group">
+        <span class="skeleton skeleton-heading"></span>
+        <div class="chips"><span class="skeleton skeleton-chip"></span><span class="skeleton skeleton-chip"></span><span class="skeleton skeleton-chip"></span></div>
+      </div>
       <div class="skeleton-group">
         <span class="skeleton skeleton-heading"></span>
         <div class="chips"><span class="skeleton skeleton-chip"></span><span class="skeleton skeleton-chip"></span></div>
       </div>
       <div class="skeleton-group">
         <span class="skeleton skeleton-heading"></span>
-        <div class="chips"><span class="skeleton skeleton-chip"></span><span class="skeleton skeleton-chip"></span></div>
+        <div class="skeleton-card">
+          <span class="skeleton skeleton-thumbnail"></span>
+          <span class="skeleton-lines"><span class="skeleton"></span><span class="skeleton"></span></span>
+        </div>
+      </div>
+      <div class="skeleton-group">
+        <span class="skeleton skeleton-heading"></span>
+        <div class="skeleton-card">
+          <span class="skeleton-lines"><span class="skeleton"></span><span class="skeleton"></span></span>
+        </div>
       </div>
     </div>
-    <div id="sections"></div>
     <section id="conversation" aria-label="Follow-up answers"></section>
   </main>
   <footer>

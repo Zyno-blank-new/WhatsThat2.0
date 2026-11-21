@@ -13,13 +13,14 @@ function modelEvidence(result) {
   const label = clean(candidate?.label, 80);
   const product = query && title && label ? {
     id: "catalog",
+    kind: "shop",
     title,
     label,
     query,
     evidence: clean(candidate.evidence, 300),
     maxUsd: Number.isFinite(candidate.maxUsd) ? candidate.maxUsd : null,
   } : null;
-  const webQueries = result.webQueries.slice(0, 3).flatMap((entry, index) => {
+  const webQueries = result.webQueries.slice(0, 5).flatMap((entry, index) => {
     const query = clean(entry?.query, 220);
     const title = clean(entry?.title, 60);
     const label = clean(entry?.label, 80);
@@ -39,7 +40,7 @@ async function runLookups(providers, evidence, signal, send) {
   if (!routing || signal.aborted) return;
   const product = routing.shop >= minimumYes ? evidence.product : null;
   const queries = evidence.webQueries.filter((query) => routing[query.id] >= minimumYes);
-  const links = [...(product ? [product] : []), ...queries].map(({ id, title, label }) => ({ id, title, label }));
+  const links = [...(product ? [product] : []), ...queries].map(({ id, title, label, kind }) => ({ id, title, label, kind }));
   if (links.length) send("lookup", { links });
 
   const search = async (type, entry, operation) => {
@@ -59,7 +60,7 @@ async function runLookups(providers, evidence, signal, send) {
 export async function inspectMoment(providers, moment, signal, send) {
   try {
     const result = await providers.analyze(moment, signal);
-    send("context", { sections: normalizeSections(result.sections, 4) });
+    send("context", { sections: normalizeSections(result.sections, 5) });
     await runLookups(providers, modelEvidence(result), signal, send);
   } catch (error) {
     if (!signal.aborted) send("error", { error: error.message });

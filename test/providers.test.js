@@ -28,7 +28,8 @@ test("Hydrogen gets only the playable video as context and prioritizes its endin
     const chip = request.response_format.schema.properties.sections.items.properties.chips.items;
     assert.deepEqual(Object.keys(chip.properties), ["label", "question"]);
     const lookup = request.response_format.schema.properties.webQueries.items;
-    assert.deepEqual(lookup.properties.kind.enum, ["answer", "video", "visit", "order", "page"]);
+    assert.deepEqual(lookup.properties.kind.enum, ["answer", "video", "visit", "order", "page", "paper", "person"]);
+    assert.equal(request.response_format.schema.properties.webQueries.maxItems, 5);
     assert.ok(lookup.required.includes("evidence"));
     return Response.json({ steps: [{
       type: "model_output",
@@ -104,8 +105,10 @@ test("lookup sections and chip labels come from the model and gated searches rou
   assert.deepEqual(events[1], {
     type: "lookup",
     links: [
-      { id: "catalog", title: product.title, label: product.label },
-      ...[0, 2].map((index) => ({ id: "web_" + index, title: webQueries[index].title, label: webQueries[index].label })),
+      { id: "catalog", title: product.title, label: product.label, kind: "shop" },
+      ...[0, 2].map((index) => ({
+        id: "web_" + index, title: webQueries[index].title, label: webQueries[index].label, kind: webQueries[index].kind,
+      })),
     ],
   });
   assert.deepEqual(calls, [product.query, webQueries[0].query, webQueries[2].query]);
@@ -235,6 +238,39 @@ test("without a valid grounding citation, prose and generic URLs cannot become a
   assert.deepEqual(await providers.search({ kind: "visit", query: "test tour" }, new AbortController().signal), {
     destinations: [], suggestions: [],
   });
+});
+
+test("academic references use a cited DOI and a Wikipedia article for each person", async () => {
+  const citations = {
+    paper: ["The Monte Carlo Method", "https://doi.org/10.1080/01621459.1949.10483310"],
+    person: ["Stanisław Ulam", "https://en.wikipedia.org/wiki/Stanis%C5%82aw_Ulam"],
+  };
+  const providers = createProviders({ apiKey: "test-key", fetcher: async (_url, options) => {
+    const request = JSON.parse(options.body);
+    const person = request.system_instruction.includes("Wikipedia biography");
+    const [title, url] = citations[person ? "person" : "paper"];
+    const line = title + " | Matches the reference in the clip.";
+    const paths = person ? [
+      "https://en.wikipedia.org/w/index.php?search=Ulam",
+      "https://en.wikipedia.org/wiki/Ulam_(disambiguation)",
+      "https://example.com/people/Ulam",
+      url,
+    ] : [url];
+    if (!person) assert.match(request.system_instruction, /exact research paper/);
+    return Response.json({ steps: [
+      { type: "google_search_result", result: [] },
+      { type: "model_output", content: [{
+        type: "text", text: line, annotations: paths.map((path) => ({
+          type: "url_citation", title: new URL(path).hostname, url: path,
+          start_index: 0, end_index: Buffer.byteLength(line),
+        })),
+      }] },
+    ] });
+  } });
+  for (const [kind, [title, url]] of Object.entries(citations)) {
+    const result = await providers.search({ kind, query: title }, new AbortController().signal);
+    assert.deepEqual(result.destinations.map((item) => item.url), [url]);
+  }
 });
 
 test("Shopify Global Catalog MCP preserves the variant link and applies an explicit budget", async () => {
