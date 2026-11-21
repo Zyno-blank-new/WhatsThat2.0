@@ -170,9 +170,9 @@ export class WebmLookback {
     this.latest = Math.max(time, this.latest);
   }
 
-  clip() {
+  clip(windowMs = this.windowMs) {
     if (!this.header || !this.info || !this.tracks) return null;
-    const oldest = this.latest - this.ticks(this.windowMs);
+    const oldest = this.latest - this.ticks(Math.min(windowMs, this.windowMs));
     const start = this.blocks.find((block) => block.time >= oldest && block.isVideo && block.isKeyframe);
     if (!start) return null;
     const duration = this.latest - start.time;

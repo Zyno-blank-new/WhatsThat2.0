@@ -9,7 +9,7 @@ import { distinctTopics, normalizeSections } from "../extension/suggestions.js";
 
 const moment = {
   screenshot: "data:image/jpeg;base64,YQ==",
-  clip: { video: "data:video/webm;base64,Yg==", durationMs: 9880 },
+  clip: { video: "data:video/webm;base64,Yg==", previewVideo: "data:video/webm;base64,Yw==", durationMs: 9880 },
   title: "Gear review",
   url: "https://example.com/review",
 };
@@ -35,11 +35,11 @@ test("Hydrogen gets only the playable video as context and prioritizes its endin
     assert.ok(lookup.required.includes("evidence"));
     return Response.json({ steps: [{
       type: "model_output",
-      content: [{ type: "text", text: JSON.stringify({ sections: [], webQueries: [], product: null }) }],
+      content: [{ type: "text", text: JSON.stringify({ sections: [], webQueries: [], products: [] }) }],
     }] });
   } });
   assert.deepEqual(await providers.analyze(moment, new AbortController().signal), {
-    sections: [], webQueries: [], product: null,
+    sections: [], webQueries: [], products: [],
   });
 });
 
@@ -55,9 +55,13 @@ test("the quick request returns section names, instant answers, and placeholders
     assert.equal(request.generation_config.thinking_level, "minimal");
     assert.deepEqual(request.input.map((item) => item.type), ["video", "text"]);
     assert.deepEqual(request.input[0].processing, { type: "static", fps: 1 });
+    assert.equal(request.input[0].data, moment.clip.previewVideo.split(",")[1]);
     assert.match(request.system_instruction, /greatest weight to the last two seconds/);
     const properties = request.response_format.schema.properties;
-    assert.deepEqual(Object.keys(properties), ["sections", "webQueries"]);
+    assert.deepEqual(Object.keys(properties), ["sections", "products", "webQueries"]);
+    assert.equal(properties.products.maxItems, 2);
+    assert.ok(properties.products.items.required.includes("description"));
+    assert.match(request.system_instruction, /distinctive items people wear/);
     assert.equal(properties.sections.maxItems, 4);
     assert.equal(properties.webQueries.maxItems, 1);
     assert.deepEqual(Object.keys(properties.sections.items.properties.chips.items.properties), ["label", "question", "answer", "sourceQuery"]);
@@ -65,7 +69,7 @@ test("the quick request returns section names, instant answers, and placeholders
       type: "text", text: JSON.stringify({ sections, webQueries: [] }),
     }] }] });
   } });
-  assert.deepEqual(await providers.quickPlan(moment, new AbortController().signal), { sections, webQueries: [] });
+  assert.deepEqual(await providers.quickPlan(moment, new AbortController().signal), { sections, products: [], webQueries: [] });
 });
 
 test("an early search starts before video analysis and is reused by the final plan", async () => {
@@ -81,7 +85,7 @@ test("an early search starts before video analysis and is reused by the final pl
     decide: async ({ webQueries }) => Object.fromEntries(webQueries.map(({ id }) => [id, 0.9])),
     search: async ({ id }) => {
       calls.push(id);
-      resolve({ sections: [], product: null, webQueries: [{ ...lookup, subject: "Stanislaw Ulam" }] });
+      resolve({ sections: [], products: [], webQueries: [{ ...lookup, subject: "Stanislaw Ulam" }] });
       return { destinations: [{ title: "Stanisław Ulam", url: "https://en.wikipedia.org/wiki/Stanis%C5%82aw_Ulam" }], suggestions: [] };
     },
   };
@@ -91,6 +95,56 @@ test("an early search starts before video analysis and is reused by the final pl
   assert.equal(events[1].preview, true);
   assert(events.findIndex(({ type }) => type === "lookup") < events.findIndex(({ type }) => type === "context"));
   assert.equal(events.filter(({ type }) => type === "web").length, 1);
+});
+
+test("distinct foreground hats reach the catalog before full analysis and matching results are reused", async () => {
+  const { promise, resolve } = Promise.withResolvers();
+  const products = [
+    { name: "Woven straw sun hat", description: "wide brim and chin cord", evidence: "A person wears it in front.", exact: false },
+    { name: "Safari fedora", description: "tan crown with a dark band", evidence: "Another person wears it in front.", exact: false },
+  ];
+  const calls = [];
+  const events = [];
+  const providers = {
+    quickPlan: async () => ({ sections: [], products, webQueries: [] }),
+    analyze: () => promise,
+    decide: async ({ products }) => Object.fromEntries(products.map(({ id }) => [id, 0.9])),
+    shop: async ({ name, description, id }) => {
+      calls.push({ name, description, id });
+      if (calls.length === 2) resolve({
+        sections: [], products: [products[1], { ...products[0], name: "Woven straw hat" }], webQueries: [],
+      });
+      return { items: [{ title: name, url: "https://example.com/products/" + id }] };
+    },
+  };
+  await inspectMoment(providers, moment, AbortSignal.timeout(1000), (type, value) => events.push({ type, ...value }));
+  assert.deepEqual(calls, products.map(({ name, description }, index) => ({ name, description, id: "preview_catalog_" + index })));
+  assert.deepEqual(events.filter(({ type, preview }) => type === "lookup" && preview).map(({ links }) => links[0].name),
+    products.map(({ name }) => name));
+  assert.equal(events.filter(({ type }) => type === "shop").length, 2);
+});
+
+test("a full-analysis product can retry an early search with a more specific description", async () => {
+  const { promise, resolve } = Promise.withResolvers();
+  const product = { name: "Straw sun hat", description: "wide brim", evidence: "Worn by the speaker.", exact: false };
+  const calls = [];
+  const providers = {
+    quickPlan: async () => ({ sections: [], products: [product], webQueries: [] }),
+    analyze: () => promise,
+    decide: async ({ products: [candidate] }) => ({ [candidate.id]: 0.9 }),
+    shop: async ({ description, id }) => {
+      calls.push(description);
+      if (id === "preview_catalog_0") {
+        resolve({ sections: [], products: [{ ...product, description: "adjustable chin cord" }], webQueries: [] });
+        return { items: [] };
+      }
+      return { items: [{ title: product.name, url: "https://example.com/products/straw-sun-hat" }] };
+    },
+  };
+  const events = [];
+  await inspectMoment(providers, moment, AbortSignal.timeout(1000), (type, value) => events.push({ type, ...value }));
+  assert.deepEqual(calls, ["wide brim", "adjustable chin cord"]);
+  assert.equal(events.find(({ type, items }) => type === "shop" && items.length).id, "catalog_0");
 });
 
 test("chip answers use the video to give explanations and can request public verification", async () => {
@@ -142,7 +196,7 @@ test("a named organization can get a cited answer without sending the video to S
 test("lookup sections and chip labels come from the model and gated searches route separately", async () => {
   const sections = [{ title: "Fabric specs", chips: [{ label: "Water column", question: "How is this rating measured?" }] }];
   const visual = { seconds: 1, box: [100, 100, 500, 600] };
-  const product = { query: "named packable rain jacket", evidence: "The model name is visible.", exact: true, visual };
+  const product = { name: "named packable rain jacket", description: "Blue shell", evidence: "The model name is visible.", exact: true, visual };
   const webQueries = [
     { title: "What reviewers say", label: "Trail performance", query: "named shell independent reviews", kind: "answer", evidence: "The shell is reviewed." },
     { title: "See the test", label: "Watch a spray test", query: "waterproof shell spray test tutorial YouTube", kind: "video", evidence: "The clip mentions a spray test." },
@@ -151,16 +205,11 @@ test("lookup sections and chip labels come from the model and gated searches rou
   const calls = [];
   const events = [];
   const providers = {
-    analyze: async () => ({ summary: "Rain shell review", sections, product, webQueries }),
-    decide: async () => ({ shop: 0.9, web_0: 0.9, web_1: 0.2, web_2: 0.8 }),
+    analyze: async () => ({ summary: "Rain shell review", sections, products: [product], webQueries }),
+    decide: async () => ({ catalog_0: 0.9, web_0: 0.9, web_1: 0.2, web_2: 0.8 }),
     shop: async (candidate) => {
-      calls.push(candidate.query);
+      calls.push(candidate.name);
       return { items: [], warnings: [] };
-    },
-    retail: async (candidate) => {
-      calls.push("retail " + candidate.query);
-      assert.equal(Object.hasOwn(candidate, "visual"), false);
-      return { items: [], suggestions: [] };
     },
     search: async (candidate) => {
       calls.push(candidate.query);
@@ -170,38 +219,36 @@ test("lookup sections and chip labels come from the model and gated searches rou
   const send = (type, payload) => events.push({ type, ...payload });
   const signal = new AbortController().signal;
   await inspectMoment(providers, moment, signal, send);
-  assert.deepEqual(events[0], { type: "context", sections, productCandidate: true });
+  assert.deepEqual(events[0], { type: "context", sections });
   assert.deepEqual(events[1], {
     type: "lookup",
     links: [
-      { id: "catalog", kind: "shop" },
+      { id: "catalog_0", kind: "shop", name: product.name, exact: true },
       ...[0, 2].map((index) => ({
         id: "web_" + index, title: webQueries[index].title, label: webQueries[index].label, kind: webQueries[index].kind,
       })),
-      { id: "retail", kind: "retail" },
     ],
   });
-  assert.deepEqual(calls, [product.query, "retail " + product.query, webQueries[0].query, webQueries[2].query]);
-  assert.deepEqual(events.filter(({ id }) => id).map(({ id }) => id).sort(), ["catalog", "retail", "web_0", "web_2"]);
-  assert.deepEqual(events.find(({ id }) => id === "retail").visual, visual);
+  assert.deepEqual(calls, [product.name, webQueries[0].query, webQueries[2].query]);
+  assert.deepEqual(events.filter(({ id }) => id).map(({ id }) => id).sort(), ["catalog_0", "web_0", "web_2"]);
 
   calls.length = 0;
-  const blocked = { ...providers, decide: async () => ({ shop: 0.2, web_0: 0.1 }) };
+  const blocked = { ...providers, decide: async () => ({ catalog_0: 0.2, web_0: 0.1 }) };
   await inspectMoment(blocked, moment, signal, send);
   assert.deepEqual(calls, []);
 
   const generic = { ...providers, analyze: async () => ({
-    sections, webQueries: [], product: { ...product, exact: false },
+    sections, webQueries: [], products: [{ ...product, exact: false }],
   }) };
   await inspectMoment(generic, moment, signal, send);
-  assert.deepEqual(calls, [product.query]);
+  assert.deepEqual(calls, [product.name]);
 
   const amazonItem = "https://www.amazon.com/dp/B0CFPJYX7P";
   events.length = 0;
   await inspectMoment(providers, { ...moment, amazonItem }, signal, send);
   assert.deepEqual(events.find(({ id }) => id === "amazon-item"), {
     type: "shop", id: "amazon-item", visual,
-    items: [{ title: product.query, url: amazonItem, merchant: "amazon.com" }],
+    items: [{ title: product.name, url: amazonItem, merchant: "amazon.com" }],
   });
 });
 
@@ -249,10 +296,11 @@ test("Decision 1 and Neon use separate operations, with grounded sources preserv
     const request = JSON.parse(options.body);
     if (url.endsWith("/decisions")) {
       assert.equal(request.model, "gemini-decision-1");
-      assert.deepEqual(Object.keys(request.questions), ["shop", "web_0", "web_1"]);
+      assert.deepEqual(Object.keys(request.questions), ["catalog_0", "web_0", "web_1"]);
+      assert.match(request.questions.catalog_0.instructions, /wear, carry, or use in the foreground/);
       assert.match(request.questions.web_1.instructions, /only lookup web_1/);
       assert.match(request.questions.web_1.instructions, /recipe.*featured dish/);
-      return Response.json({ answers: { shop: { noul: 0.9 }, web_0: { noul: 0.8 }, web_1: { noul: 0.1 } } });
+      return Response.json({ answers: { catalog_0: { noul: 0.9 }, web_0: { noul: 0.8 }, web_1: { noul: 0.1 } } });
     }
     assert.equal(request.model, "gemini-4-neon");
     assert.deepEqual(request.tools, [{ type: "google_search" }]);
@@ -269,8 +317,8 @@ test("Decision 1 and Neon use separate operations, with grounded sources preserv
   } });
   const signal = new AbortController().signal;
   assert.deepEqual(await providers.decide({
-    product: { label: "Jacket" }, webQueries: [{ id: "web_0", kind: "answer" }, { id: "web_1", kind: "page" }],
-  }, signal), { shop: 0.9, web_0: 0.8, web_1: 0.1 });
+    products: [{ id: "catalog_0", name: "Jacket" }], webQueries: [{ id: "web_0", kind: "answer" }, { id: "web_1", kind: "page" }],
+  }, signal), { catalog_0: 0.9, web_0: 0.8, web_1: 0.1 });
   const result = await providers.search({ query: "Jacket", kind: "answer", evidence: "private context" }, signal);
   assert.equal(result.searched, true);
   assert.equal(result.blocks[0].citations[0].url, "https://example.com/item");
@@ -382,6 +430,8 @@ test("Shopify Global Catalog MCP preserves the variant link and applies an expli
     const { params } = JSON.parse(options.body);
     assert.equal(params.name, "search_catalog");
     assert.match(params.arguments.meta["ucp-agent"].profile, /^https:\/\/shopify\.dev\//);
+    assert.equal(params.arguments.catalog.query, "Packable rain jacket blue shell");
+    assert.equal(params.arguments.catalog.view, "compact");
     assert.equal(params.arguments.catalog.filters.price.max, 10_000);
     return Response.json({ result: { structuredContent: {
       products: [{
@@ -395,42 +445,11 @@ test("Shopify Global Catalog MCP preserves the variant link and applies an expli
       messages: [{ type: "warning", content: "Some availability varies." }],
     } } });
   } });
-  const result = await providers.shop({ query: "packable rain jacket", maxUsd: 100 }, new AbortController().signal);
+  const result = await providers.shop({ name: "Packable rain jacket", description: "blue shell", maxUsd: 100 }, new AbortController().signal);
   assert.deepEqual(result, {
     warnings: ["Some availability varies."],
     items: [{ title: "Packable jacket", price: "$64.00", merchant: "Merchant", image: "https://example.com/jacket.jpg", url }],
   });
-});
-
-test("retail cards use specific ordering pages across retailers", async () => {
-  const matches = [
-    ["Amazon category", "https://www.amazon.com/kindle/b/?node=16571048011"],
-    ["Kindle Paperwhite", "https://www.amazon.com/dp/B0CFPJYX7P"],
-    ["Alternate Amazon offer", "https://amazon.com/gp/product/B0CFPJYX7P"],
-    ["Kindle Paperwhite", "https://www.bestbuy.com/site/kindle-paperwhite/123.p"],
-  ];
-  const lines = matches.map(([title]) => title + " | Ordering page.");
-  let start = 0;
-  const annotations = matches.map(([, url], index) => {
-    const end = start + lines[index].length;
-    const citation = { type: "url_citation", url, title: new URL(url).hostname, start_index: start, end_index: end };
-    start = end + 1;
-    return citation;
-  });
-  const providers = createProviders({ apiKey: "test-key", fetcher: async (_url, options) => {
-    const request = JSON.parse(options.body);
-    assert.match(request.system_instruction, /direct U.S. ordering pages for the exact product/);
-    assert.match(request.input, /Kindle Paperwhite/);
-    return Response.json({ steps: [
-      { type: "google_search_result", result: [] },
-      { type: "model_output", content: [{ type: "text", text: lines.join("\n"), annotations }] },
-    ] });
-  } });
-  const result = await providers.retail({ query: "Kindle Paperwhite" }, new AbortController().signal);
-  assert.deepEqual(result.items, [
-    { title: "Kindle Paperwhite", merchant: "amazon.com", url: matches[1][1] },
-    { title: "Kindle Paperwhite", merchant: "bestbuy.com", url: matches[3][1] },
-  ]);
 });
 
 test("product links exclude Amazon searches and image matching preserves variants", () => {

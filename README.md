@@ -15,7 +15,7 @@ Lookback restores tab audio output and keeps a rolling WebM buffer in memory. Ch
 
 | Component | Hackathon implementation |
 |---|---|
-| Gemini 3.5 Flash-Lite | Uses the WebM clip to plan early headings and prepare up to two instant answers, in parallel with Hydrogen. A clear named reference can start a gated lookup while Hydrogen is still analyzing the clip. |
+| Gemini 3.5 Flash-Lite | Uses roughly the latest three seconds of WebM to plan early headings, prepare up to two instant answers, and identify distinctive products. Approved products and clear named references can start lookups while Hydrogen analyzes the entire lookback. |
 | Gemini 4 Hydrogen | Reads the clip and prioritizes its final two seconds. Chooses sections, questions, and likely next actions with evidence from the clip. Explains the topic on demand and identifies when a public source would help. |
 | Gemini Decision 1 | Identifies repeated topics and screens each lookup against its evidence in a single routing request. Approved lookups start automatically. |
 | Gemini 4 Neon | Uses Google Search grounding to find specific destinations and cite reviews, prices, and other factual answers. It also verifies selected chip and typed answers from a public text query. Independent approved searches run in parallel. |
@@ -23,7 +23,7 @@ Lookback restores tab audio output and keeps a rolling WebM buffer in memory. Ch
 
 The sidebar calls Gemini, the Decisions API, and Shopify directly. It starts with four skeleton sections for headings, chips, video, and links. Ready chips appear while lookups continue loading. The full analysis updates the initial suggestions while keeping any chip the user has opened. Direct cards can show cited research papers, Wikipedia biographies for named public figures, specific YouTube tutorials, official guides, tours, recipes, or exact ordering pages. Web destinations come from Google Search citations and open in a new tab. Each installation saves its own Gemini key in local Chrome extension storage, restricted to trusted extension pages. The WebM clip contains the tab’s video and audio and is the sole media input to Gemini. Uploads start after a shortcut, toolbar analyze action, or an answer request.
 
-The **Products** section is always visible. Relevant results from Shopify and exact products found at U.S. retailers appear together. When the current tab is an Amazon item page, the section can link to that exact listing. Each card opens the merchant’s listing. Retailer cards use a catalog photo when the product titles match, or a thumbnail cropped locally from the clip when the item was visible. A placeholder covers listings without a reliable image.
+The **Products** section is always visible. It searches Shopify Global Catalog MCP directly with each detected item’s name and visible features, including distinctive clothes or accessories worn in the foreground. A single Decisions request can approve two distinct items for parallel catalog searches. The sidebar labels unknown styles as similar matches and shows merchant photos, prices, and direct listing links as results arrive. When the current tab is an Amazon item page, the section can also link to that exact listing.
 
 Chip answers are prepared during the analysis and appear on click. A public fact can still receive cited verification in the background. Video cards use a YouTube thumbnail when the video ID is known or independently matched. Other links use a site favicon when available, with a built-in icon as a fallback.
 
@@ -32,7 +32,7 @@ Chip answers are prepared during the analysis and appear on click. A public fact
 - With Node.js 22 or newer, run `npm test` for provider and settings checks. These tests simulate responses to verify model IDs, the video-only payload, per-lookup routing, citation-backed destination cards, and Shopify listings.
 - For the live demo, use a clip you have permission to show. Turn captions off, let an item go off screen, then press the shortcut. Check whether the suggestions retain the product and its spoken constraints.
 - Test a separate set of untuned real clips and pages, including noisy audio, fast scrolling, and incidental background products. Compare the screenshot-only route with the full capture using the same frame and timestamp as closely as possible.
-- Record capture-to-first-useful-chip latency, whether the item and constraints were identified, and whether Shopify and Search were routed appropriately. Inspect the sidebar console for keypress-to-first-chip timing. Two seconds is the target for the first useful label. Track answer latency separately, from chip click to explanation.
+- Record whether the item and its constraints were identified and whether Shopify and Search were routed appropriately. Inspect the sidebar console for keypress-to-first-chip and keypress-to-first-product-card timings. Two seconds is the target for the first useful label. Track answer latency separately, from chip click to explanation.
 - Record one genuine failure and the change made after observing it. Provider contract tests are development checks. Use real inputs for the judging evaluation.
 
 The previous ADA project is the conceptual reference. The Manifest V3 panel, rolling screen-and-audio recorder, Gemini 4 workflows, Decisions API routing, and Shop integration are the new implementation in this repository.

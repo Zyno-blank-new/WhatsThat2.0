@@ -1,5 +1,6 @@
 import { WebmLookback } from "./webm.js";
 
+const previewWindowMs = 3200;
 let active = null;
 
 function options(streamId, extra = {}) {
@@ -105,7 +106,13 @@ async function snapshot(tabId) {
   if (active !== session || session.recorder !== recorder) return null;
   if (session.error) throw new Error(session.error);
   const clip = session.buffer.clip();
-  return clip ? { video: await dataUrl(clip.bytes), durationMs: clip.durationMs } : null;
+  if (!clip) return null;
+  const preview = clip.durationMs > previewWindowMs ? session.buffer.clip(previewWindowMs) : null;
+  const [video, previewVideo] = await Promise.all([
+    dataUrl(clip.bytes),
+    preview && dataUrl(preview.bytes),
+  ]);
+  return { video, durationMs: clip.durationMs, previewVideo };
 }
 
 chrome.runtime.onMessage.addListener((message, _sender, reply) => {

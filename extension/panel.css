@@ -106,7 +106,8 @@ kbd { display: grid; place-items: center; min-width: 28px; height: 27px; border:
 .destination-meta { color: var(--muted); font-size: 11px; line-height: 1.25; }
 .destination-reason { color: var(--muted); font-size: 12px; line-height: 1.4; }
 .destination-arrow { color: var(--accent); font-size: 13px; line-height: 1.3; text-align: center; }
-.product-results + .product-results { margin-top: 7px; }
+.product-results + .product-results { margin-top: 12px; }
+.product-group-name { color: var(--muted); font-size: 12px; font-weight: 640; margin: 0 0 7px; }
 .product-results[aria-busy="true"] { background: var(--card); border: 1px solid var(--line); border-radius: 11px; padding: 11px; }
 #product-status { color: var(--muted); }
 .product { display: grid; grid-template-columns: 54px minmax(0, 1fr) 13px; align-items: center; gap: 9px; background: var(--card); border: 1px solid var(--line); border-radius: 11px; color: var(--ink); padding: 9px; text-decoration: none; overflow-wrap: anywhere; }

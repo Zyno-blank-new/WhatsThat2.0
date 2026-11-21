@@ -6,19 +6,18 @@ function clean(value, limit) {
   return typeof value === "string" ? value.trim().slice(0, limit) : "";
 }
 
-function modelEvidence(result, prefix = "web") {
-  const candidate = result.product;
-  const query = clean(candidate?.query, 240);
-  const evidence = clean(candidate?.evidence, 300);
-  const product = query && evidence ? {
-    id: "catalog",
-    kind: "shop",
-    query,
-    evidence,
-    exact: candidate.exact === true,
-    maxUsd: Number.isFinite(candidate.maxUsd) ? candidate.maxUsd : null,
-  } : null;
-  const webQueries = result.webQueries.slice(0, 5).flatMap((entry, index) => {
+function modelEvidence(result, preview = false) {
+  const products = (Array.isArray(result.products) ? result.products : []).slice(0, 2).flatMap((candidate, index) => {
+    const name = clean(candidate?.name, 100);
+    const evidence = clean(candidate?.evidence, 240);
+    if (!name || !evidence) return [];
+    return [{
+      id: (preview ? "preview_catalog_" : "catalog_") + index, kind: "shop", name, evidence,
+      description: clean(candidate.description, 120), exact: candidate.exact === true,
+      maxUsd: Number.isFinite(candidate.maxUsd) ? candidate.maxUsd : null,
+    }];
+  });
+  const webQueries = (Array.isArray(result.webQueries) ? result.webQueries : []).slice(0, 5).flatMap((entry, index) => {
     const query = clean(entry?.query, 220);
     const title = clean(entry?.title, 60);
     const label = clean(entry?.label, 80);
@@ -26,79 +25,101 @@ function modelEvidence(result, prefix = "web") {
     const subject = clean(entry?.subject, 200);
     const evidence = clean(entry?.evidence, 240);
     return query && title && label && kind && evidence
-      ? [{ id: prefix + "_" + index, title, label, query, kind, subject, evidence }] : [];
+      ? [{ id: (preview ? "preview_" : "web_") + index, title, label, query, kind, subject, evidence }] : [];
   });
-  return { summary: clean(result.summary, 400), product, webQueries };
+  return { summary: clean(result.summary, 400), products, webQueries };
 }
 
 function lookupKey(entry) {
-  return entry.kind + ":" + (entry.subject || entry.query).normalize("NFKD").toLowerCase()
+  return entry.kind + ":" + (entry.name || entry.subject || entry.query).normalize("NFKD").toLowerCase()
     .replace(/\p{Mark}/gu, "").replace(/ł/g, "l").replace(/[^\p{L}\p{N}]+/gu, " ").trim();
 }
 
-function startEarlyLookup(providers, plan, signal, send, early) {
-  const evidence = modelEvidence({ webQueries: plan.webQueries }, "preview");
-  const query = evidence.webQueries.find((entry) => entry.subject && ["paper", "person", "video"].includes(entry.kind));
-  if (!query) return;
-  evidence.webQueries = [query];
-  const task = (async () => {
-    const routing = await providers.decide(evidence, signal).catch(() => null);
-    if (signal.aborted || !(routing?.[query.id] >= minimumYes)) return false;
-    send("lookup", { links: [query], preview: true });
-    const result = await providers.search(query, signal).catch(() => null);
-    if (signal.aborted) return false;
-    send("web", { id: query.id, destinations: result?.destinations ?? [], suggestions: result?.suggestions ?? [] });
-    return Boolean(result?.destinations?.length);
-  })();
-  early.set(lookupKey(query), task);
-  return task;
+function matchingPrefetch(entry, early) {
+  const key = lookupKey(entry);
+  const match = early.get(key);
+  if (match || entry.kind !== "shop" || entry.exact) return match;
+  const words = new Set(key.slice("shop:".length).split(" "));
+  for (const [otherKey, item] of early) {
+    if (item.entry.kind !== "shop" || item.entry.exact) continue;
+    const otherWords = new Set(otherKey.slice("shop:".length).split(" "));
+    const shared = [...words].filter((word) => otherWords.has(word)).length;
+    // Reuse "woven straw hat" for "woven straw sun hat" while keeping distinct styles.
+    if (shared >= 3 && shared === Math.min(words.size, otherWords.size) &&
+        Math.abs(words.size - otherWords.size) <= 1) return item;
+  }
 }
 
-async function runLookups(providers, evidence, visual, amazonItem, signal, send, early) {
-  if (!evidence.product && !evidence.webQueries.length) return;
+function lookupLink({ id, kind, title, label, name, exact }) {
+  return kind === "shop" ? { id, kind, name, exact } : { id, kind, title, label };
+}
+
+async function fetchLookup(providers, entry, signal, send, preview = false) {
+  const shopping = entry.kind === "shop";
+  try {
+    const result = await (shopping ? providers.shop(entry, signal) : providers.search(entry, signal));
+    if (signal.aborted) return false;
+    send(shopping ? "shop" : "web", { id: entry.id, ...result });
+    return Boolean((shopping ? result.items : result.destinations)?.length);
+  } catch (error) {
+    if (!signal.aborted) send("warning", { id: entry.id, message: preview ? "" : error.message });
+    return false;
+  }
+}
+
+function startEarlyLookups(providers, plan, signal, send, early) {
+  const evidence = modelEvidence(plan, true);
+  evidence.webQueries = evidence.webQueries.filter((entry) =>
+    entry.subject && ["paper", "person", "video"].includes(entry.kind)).slice(0, 1);
+  const entries = [...evidence.products, ...evidence.webQueries];
+  if (!entries.length) return;
+  const routing = providers.decide(evidence, signal).catch(() => null);
+  return Promise.all(entries.map((entry) => {
+    const task = (async () => {
+      const approved = await routing;
+      if (signal.aborted || !(approved?.[entry.id] >= minimumYes)) return false;
+      send("lookup", { links: [lookupLink(entry)], preview: true });
+      return fetchLookup(providers, entry, signal, send, true);
+    })();
+    early.set(lookupKey(entry), { entry, task });
+    return task;
+  }));
+}
+
+async function runLookups(providers, evidence, result, amazonItem, signal, send, early) {
+  if (!evidence.products.length && !evidence.webQueries.length) return;
   const routing = await providers.decide(evidence, signal).catch((error) => {
     if (!signal.aborted) send("warning", { message: error.message });
     return null;
   });
   if (!routing || signal.aborted) return;
-  const product = routing.shop >= minimumYes ? evidence.product : null;
-  const queries = evidence.webQueries.filter((query) => routing[query.id] >= minimumYes);
-  const retail = product?.exact ? { id: "retail", kind: "retail" } : null;
-  const currentAmazon = retail && amazonItem ? { id: "amazon-item", kind: "retail" } : null;
-  const links = queries.filter((query) => !early.has(lookupKey(query)))
-    .map(({ id, title, label, kind }) => ({ id, title, label, kind }));
-  if (product) links.unshift({ id: product.id, kind: "shop" });
-  if (retail) links.push(retail);
+  const approved = [...evidence.products, ...evidence.webQueries].filter((entry) => routing[entry.id] >= minimumYes);
+  const reused = new Set();
+  const matches = approved.map((entry) => {
+    const prefetched = matchingPrefetch(entry, early);
+    const compatible = prefetched && !reused.has(prefetched) && (!entry.exact || prefetched.entry.exact) &&
+      entry.maxUsd === prefetched.entry.maxUsd;
+    if (compatible) reused.add(prefetched);
+    return { entry, prefetched: compatible ? prefetched.task : null };
+  });
+  const product = amazonItem && approved.find((entry) => entry.kind === "shop" && entry.exact);
+  const currentAmazon = product ? { id: "amazon-item", kind: "shop" } : null;
+  const links = matches.filter(({ prefetched }) => !prefetched).map(({ entry }) => lookupLink(entry));
   if (currentAmazon) links.unshift(currentAmazon);
   send("lookup", { links });
   if (currentAmazon) send("shop", {
-    id: currentAmazon.id, visual, items: [{ title: product.query, url: amazonItem, merchant: "amazon.com" }],
+    id: currentAmazon.id,
+    visual: result.products.find(({ name }) => clean(name, 100) === product.name)?.visual,
+    items: [{ title: product.name, url: amazonItem, merchant: "amazon.com" }],
   });
 
-  const search = async (type, entry, operation) => {
-    try {
-      const result = await operation();
-      if (!signal.aborted) send(type, { id: entry.id, ...result });
-    } catch (error) {
-      if (!signal.aborted) send("warning", { id: entry.id, message: error.message });
+  await Promise.all(matches.map(async ({ entry, prefetched }) => {
+    if (prefetched) {
+      if (await prefetched || signal.aborted) return;
+      send("lookup", { links: [lookupLink(entry)], preview: true });
     }
-  };
-  await Promise.all([
-    product && search("shop", product, () => providers.shop(product, signal)),
-    retail && search("shop", retail, async () => {
-      const result = await providers.retail(product, signal);
-      const items = currentAmazon ? result.items.filter((item) => item.merchant !== "amazon.com") : result.items;
-      return { ...result, items, visual };
-    }),
-    ...queries.map(async (query) => {
-      const prefetched = early.get(lookupKey(query));
-      if (prefetched) {
-        if (await prefetched || signal.aborted) return;
-        send("lookup", { links: [query], preview: true });
-      }
-      return search("web", query, () => providers.search(query, signal));
-    }),
-  ]);
+    return fetchLookup(providers, entry, signal, send);
+  }));
 }
 
 export async function inspectMoment(providers, moment, signal, send) {
@@ -110,14 +131,14 @@ export async function inspectMoment(providers, moment, signal, send) {
       void providers.quickPlan(moment, signal).then((plan) => {
         if (signal.aborted || fullReady) return;
         send("preview", { sections: plan.sections });
-        earlyTask = startEarlyLookup(providers, plan, signal, send, early);
+        earlyTask = startEarlyLookups(providers, plan, signal, send, early);
       }).catch(() => {});
     }
     const result = await providers.analyze(moment, signal);
     fullReady = true;
     const evidence = modelEvidence(result);
-    send("context", { sections: normalizeSections(result.sections, 5), productCandidate: Boolean(evidence.product) });
-    await runLookups(providers, evidence, result.product?.visual, moment.amazonItem, signal, send, early);
+    send("context", { sections: normalizeSections(result.sections, 5) });
+    await runLookups(providers, evidence, result, moment.amazonItem, signal, send, early);
     await earlyTask;
   } catch (error) {
     fullReady = true;

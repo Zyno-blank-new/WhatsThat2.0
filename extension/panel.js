@@ -103,6 +103,7 @@ function setProductStatus(message = "") {
 
 function updateProducts() {
   if (productUrls.size || ui.productResults.querySelector('[aria-busy="true"]')) setProductStatus();
+  else if (sectionsPending || routingPending) setProductStatus("Checking for related products…");
   else setProductStatus("No matching products for this moment.");
 }
 
@@ -330,10 +331,14 @@ async function refineSuggestions(providers, value, signal) {
 }
 
 function mountLookups(links) {
-  for (const { id, title, label, kind } of links) {
-    if (kind === "shop" || kind === "retail") {
+  for (const { id, title, label, kind, name, exact } of links) {
+    if (kind === "shop") {
       const body = make("div", "product-results");
       showPending(body, "Looking up products…");
+      if (name) {
+        body.dataset.heading = exact ? name : "Similar to " + name;
+        body.prepend(make("h3", "product-group-name", body.dataset.heading));
+      }
       ui.productResults.append(body);
       lookupEntries.set(id, body);
       continue;
@@ -371,9 +376,11 @@ function finishLookup(id) {
   return body;
 }
 
-function showShop({ id, items, warnings = [], suggestions = [], visual }) {
+function showShop({ id, items, warnings = [], visual }) {
   const block = finishLookup(id);
   if (!block) return;
+  const catalog = id !== "amazon-item";
+  const isFirstProduct = !productUrls.size;
   const grid = make("div", "product-grid");
   const placeholders = [];
   for (const item of items) {
@@ -382,11 +389,11 @@ function showShop({ id, items, warnings = [], suggestions = [], visual }) {
     productUrls.add(card.href);
     const source = externalUrl(item.image);
     const photoKey = productPhotoKey(item.title);
-    if (id === "catalog" && photoKey && source) catalogImages.set(photoKey, source);
+    if (catalog && photoKey && source) catalogImages.set(photoKey, source);
     const placeholder = make("span", "product-placeholder");
     placeholder.setAttribute("aria-hidden", "true");
     if (!source) addCardImage(placeholder, siteIcon(item.merchant) || siteIcon(new URL(card.href).hostname));
-    if (!source && id !== "catalog") {
+    if (!source && !catalog) {
       if (photoKey) pendingProductImages.set(placeholder, photoKey);
       if (visual) placeholders.push(placeholder);
     }
@@ -400,8 +407,9 @@ function showShop({ id, items, warnings = [], suggestions = [], visual }) {
     grid.append(card);
   }
   if (grid.children.length) {
+    if (block.dataset.heading) block.append(make("h3", "product-group-name", block.dataset.heading));
     block.append(grid);
-    appendSearchSuggestions(block, suggestions);
+    if (isFirstProduct && moment) console.info("What’sThat? first product card", (Date.now() - moment.capturedAt) + " ms");
   }
   for (const message of warnings) block.append(make("p", "notice", message));
   if (!block.children.length) block.remove();
@@ -584,7 +592,6 @@ function receiveAnalysis(event) {
   if (event.type === "preview") showPlan(event.sections);
   if (event.type === "context") {
     sectionsPending = false;
-    if (!event.productCandidate) updateProducts();
     if (event.sections.length) replaceSuggestions(event.sections);
     if (!routingPending) setStatus();
     updateSkeletons();
@@ -594,17 +601,23 @@ function receiveAnalysis(event) {
     if (!event.preview) {
       routingPending = false;
       clearPlannedSections();
-      updateProducts();
       setStatus();
     }
+    updateProducts();
     updateSkeletons();
   }
   if (event.type === "shop") showShop(event);
   if (event.type === "web") showWeb(event);
   if (event.type === "warning") {
     if (event.id) {
-      finishLookup(event.id)?.append(make("p", "notice error", event.message));
-      if (event.id === "catalog" || event.id === "retail") updateProducts();
+      const block = finishLookup(event.id);
+      if (event.message) block?.append(make("p", "notice error", event.message));
+      else {
+        block?.remove();
+        lookupEntries.delete(event.id);
+        pruneEmptyGroups();
+      }
+      updateProducts();
     }
     else setNotice(event.message, true);
   }
