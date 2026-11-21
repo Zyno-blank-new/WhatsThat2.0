@@ -27,6 +27,9 @@ test("Hydrogen gets only the playable video as context and prioritizes its endin
     assert.match(request.system_instruction, /final two seconds as the strongest signal/);
     const chip = request.response_format.schema.properties.sections.items.properties.chips.items;
     assert.deepEqual(Object.keys(chip.properties), ["label", "question"]);
+    const lookup = request.response_format.schema.properties.webQueries.items;
+    assert.deepEqual(lookup.properties.kind.enum, ["answer", "video", "visit", "order", "page"]);
+    assert.ok(lookup.required.includes("evidence"));
     return Response.json({ steps: [{
       type: "model_output",
       content: [{ type: "text", text: JSON.stringify({ sections: [], webQueries: [], product: null }) }],
@@ -76,19 +79,20 @@ test("lookup sections and chip labels come from the model and gated searches rou
   const sections = [{ title: "Fabric specs", chips: [{ label: "Water column", question: "How is this rating measured?" }] }];
   const product = { title: "Shop similar shells", label: "Packable rain jackets", query: "packable rain jacket" };
   const webQueries = [
-    { title: "What reviewers say", label: "Trail performance", query: "named shell independent reviews" },
-    { title: "Compare prices", label: "Other stores", query: "named shell exact variant prices" },
+    { title: "What reviewers say", label: "Trail performance", query: "named shell independent reviews", kind: "answer", evidence: "The shell is reviewed." },
+    { title: "See the test", label: "Watch a spray test", query: "waterproof shell spray test tutorial YouTube", kind: "video", evidence: "The clip mentions a spray test." },
+    { title: "Compare prices", label: "Other stores", query: "named shell exact variant prices", kind: "answer", evidence: "The exact model is visible." },
   ];
   const calls = [];
   const events = [];
   const providers = {
     analyze: async () => ({ summary: "Rain shell review", sections, product, webQueries }),
-    decide: async () => ({ shop: 0.9, web: 0.9 }),
+    decide: async () => ({ shop: 0.9, web_0: 0.9, web_1: 0.2, web_2: 0.8 }),
     shop: async (candidate) => {
       calls.push(candidate.query);
       return { items: [], warnings: [] };
     },
-    search: async ([candidate]) => {
+    search: async (candidate) => {
       calls.push(candidate.query);
       return { blocks: [], suggestions: [] };
     },
@@ -101,14 +105,14 @@ test("lookup sections and chip labels come from the model and gated searches rou
     type: "lookup",
     links: [
       { id: "catalog", title: product.title, label: product.label },
-      ...webQueries.map(({ title, label }, index) => ({ id: "web-" + index, title, label })),
+      ...[0, 2].map((index) => ({ id: "web_" + index, title: webQueries[index].title, label: webQueries[index].label })),
     ],
   });
-  assert.deepEqual(calls, [product.query, ...webQueries.map(({ query }) => query)]);
-  assert.deepEqual(events.filter(({ id }) => id).map(({ id }) => id), ["catalog", "web-0", "web-1"]);
+  assert.deepEqual(calls, [product.query, webQueries[0].query, webQueries[2].query]);
+  assert.deepEqual(events.filter(({ id }) => id).map(({ id }) => id), ["catalog", "web_0", "web_2"]);
 
   calls.length = 0;
-  const blocked = { ...providers, decide: async () => ({ shop: 0.2, web: 0.1 }) };
+  const blocked = { ...providers, decide: async () => ({ shop: 0.2, web_0: 0.1 }) };
   await inspectMoment(blocked, moment, signal, send);
   assert.deepEqual(calls, []);
 });
@@ -157,11 +161,14 @@ test("Decision 1 and Neon use separate operations, with grounded sources preserv
     const request = JSON.parse(options.body);
     if (url.endsWith("/decisions")) {
       assert.equal(request.model, "gemini-decision-1");
-      assert.deepEqual(Object.keys(request.questions), ["shop", "web"]);
-      return Response.json({ answers: { shop: { noul: 0.9 }, web: { noul: 0.8 } } });
+      assert.deepEqual(Object.keys(request.questions), ["shop", "web_0", "web_1"]);
+      assert.match(request.questions.web_1.instructions, /only lookup web_1/);
+      assert.match(request.questions.web_1.instructions, /recipe.*featured dish/);
+      return Response.json({ answers: { shop: { noul: 0.9 }, web_0: { noul: 0.8 }, web_1: { noul: 0.1 } } });
     }
     assert.equal(request.model, "gemini-4-neon");
     assert.deepEqual(request.tools, [{ type: "google_search" }]);
+    assert.doesNotMatch(request.input, /private context/);
     return Response.json({
       steps: [
         { type: "google_search_result", result: [{ search_suggestions: "<style></style>" }] },
@@ -173,11 +180,61 @@ test("Decision 1 and Neon use separate operations, with grounded sources preserv
     });
   } });
   const signal = new AbortController().signal;
-  assert.deepEqual(await providers.decide({ product: { label: "Jacket" } }, signal), { shop: 0.9, web: 0.8 });
-  const result = await providers.search([{ query: "Jacket" }], "jacket", signal);
+  assert.deepEqual(await providers.decide({
+    product: { label: "Jacket" }, webQueries: [{ id: "web_0", kind: "answer" }, { id: "web_1", kind: "page" }],
+  }, signal), { shop: 0.9, web_0: 0.8, web_1: 0.1 });
+  const result = await providers.search({ query: "Jacket", kind: "answer", evidence: "private context" }, signal);
   assert.equal(result.searched, true);
   assert.equal(result.blocks[0].citations[0].url, "https://example.com/item");
   assert.deepEqual(result.suggestions, ["<style></style>"]);
+});
+
+test("Neon action results use citation URLs for specific destinations, including Unicode titles", async () => {
+  const redirect = "https://vertexaisearch.cloud.google.com/grounding-api-redirect/grounded-video";
+  const direct = "https://www.youtube.com/watch?v=spUNpyF58BY";
+  const titles = ["No source", "FFT — a visual guide", "FFT | Worked example", "Search results", "Unsafe URL"];
+  const lines = titles.map((title) => title + " | One useful step.");
+  const urls = ["", redirect, direct, "https://www.youtube.com/results?search_query=fft", "javascript:alert(1)"];
+  let offset = 0;
+  const annotations = lines.flatMap((line, i) => {
+    const start = offset;
+    offset += Buffer.byteLength(line) + 1;
+    return urls[i] ? [{
+      type: "url_citation", title: "youtube.com", url: urls[i], start_index: start, end_index: offset - 1,
+    }] : [];
+  });
+  const providers = createProviders({ apiKey: "test-key", fetcher: async (_url, options) => {
+    const request = JSON.parse(options.body);
+    assert.equal(request.model, "gemini-4-neon");
+    assert.match(request.system_instruction, /individual YouTube video/);
+    return Response.json({ steps: [
+      { type: "google_search_result", result: [{ search_suggestions: "<div>FFT</div>" }] },
+      { type: "model_output", content: [{ type: "text", text: lines.join("\n"), annotations }] },
+    ] });
+  } });
+  const result = await providers.search({ kind: "video", query: "visual FFT tutorial" }, new AbortController().signal);
+  assert.deepEqual(result, {
+    destinations: [
+      { title: titles[1], reason: "One useful step.", url: redirect, site: "youtube.com" },
+      { title: titles[2], reason: "One useful step.", url: direct, site: "youtube.com" },
+    ],
+    suggestions: ["<div>FFT</div>"],
+  });
+});
+
+test("without a valid grounding citation, prose and generic URLs cannot become action links", async () => {
+  const text = "Unrelated homepage | Looks plausible.";
+  const providers = createProviders({ apiKey: "test-key", fetcher: async () => Response.json({ steps: [
+    { type: "google_search_result", result: [] },
+    { type: "model_output", content: [{
+      type: "text", text,
+      annotations: [{ type: "url_citation", title: "example.com", url: "https://example.com/", start_index: 0, end_index: text.length }],
+    }] },
+    { type: "model_output", content: [{ type: "text", text: "Invented | https://example.org/tour" }] },
+  ] }) });
+  assert.deepEqual(await providers.search({ kind: "visit", query: "test tour" }, new AbortController().signal), {
+    destinations: [], suggestions: [],
+  });
 });
 
 test("Shopify Global Catalog MCP preserves the variant link and applies an explicit budget", async () => {

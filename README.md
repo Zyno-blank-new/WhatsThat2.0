@@ -1,6 +1,6 @@
 # What’sThat? 2.0
 
-What if Gemini could help you with what you just saw in Chrome? What’sThat? is an independent **Element 119** hackathon prototype. It keeps up to 10 seconds of the active tab’s video and audio, then uses that clip to fill a dark Chrome side panel with short, context-specific chips.
+What if Gemini could help you with what you just saw in Chrome? What’sThat? is an independent **Element 119** hackathon prototype. It keeps up to 10 seconds of the active tab’s video and audio, then uses that clip to suggest questions and actions in a dark Chrome side panel.
 
 ## Load in Chrome
 
@@ -16,16 +16,16 @@ Lookback restores tab audio output and keeps a rolling WebM buffer in memory. Ch
 | Component | Hackathon implementation |
 |---|---|
 | Gemini 3.5 Flash-Lite | Uses the WebM clip to choose up to two initial chips and their headings, in parallel with Hydrogen. |
-| Gemini 4 Hydrogen | Prioritizes the final two seconds of the WebM clip and uses earlier frames and audio for additional context. Chooses section headings, chips, and lookup candidates. It generates an explanation when the user opens a chip. |
-| Gemini Decision 1 | Identifies repeated topics in the final suggestions and evaluates whether shopping and web searches are useful. Relevant searches start automatically. |
-| Gemini 4 Neon | Uses Google Search grounding for cited explanations, references, current prices, and reviews. |
+| Gemini 4 Hydrogen | Reads the clip and prioritizes its final two seconds. Chooses sections, questions, and likely next actions with evidence from the clip. Answers questions on demand. |
+| Gemini Decision 1 | Identifies repeated topics and screens each lookup against its evidence in a single routing request. Approved lookups start automatically. |
+| Gemini 4 Neon | Uses Google Search grounding to find specific destinations and cite reviews, prices, and other factual answers. Independent approved searches run in parallel. |
 | Shopify Global Catalog MCP | Searches across Shopify merchants for similar products, using an explicit USD budget if one was supplied. Displays live featured variants, prices, and merchant links. The prototype uses Shopify’s documented example agent profile. |
 
-The sidebar calls Gemini, the Decisions API, and Shopify directly. It shows skeletons while it waits for chip labels. The full analysis updates the initial suggestions while keeping any chip the user has opened. Relevant product listings, independent reviews, price comparisons, and external references appear under AI-selected headings. Click a chip to ask its specific question or open lookup results. The user can ask a follow-up about the same frozen capture. Each installation saves its own Gemini key in local Chrome extension storage, restricted to trusted extension pages. The WebM clip contains the tab’s video and audio and is the sole media input to Gemini. Uploads start after a shortcut, toolbar analyze action, or an answer request.
+The sidebar calls Gemini, the Decisions API, and Shopify directly. It shows skeletons while it waits for chip labels. The full analysis updates the initial suggestions while keeping any chip the user has opened. An action chip can show a specific YouTube tutorial, official guide, tour operator itinerary, recipe, exact food ordering page, or Shopify listing. Web destinations come from Google Search citations and open in a new tab. Each installation saves its own Gemini key in local Chrome extension storage, restricted to trusted extension pages. The WebM clip contains the tab’s video and audio and is the sole media input to Gemini. Uploads start after a shortcut, toolbar analyze action, or an answer request.
 
 ## Verification and judging
 
-- With Node.js 22 or newer, run `npm test` for provider and settings checks. These tests simulate responses to verify model IDs, the video-only payload, dynamic lookup groups, citations, and Shopify listings.
+- With Node.js 22 or newer, run `npm test` for provider and settings checks. These tests simulate responses to verify model IDs, the video-only payload, per-lookup routing, citation-backed destination cards, and Shopify listings.
 - For the live demo, use a clip you have permission to show. Turn captions off, let an item go off screen, then press the shortcut. Check whether the suggestions retain the product and its spoken constraints.
 - Test a separate set of untuned real clips and pages, including noisy audio, fast scrolling, and incidental background products. Compare the screenshot-only route with the full capture using the same frame and timestamp as closely as possible.
 - Record capture-to-first-useful-chip latency, whether the item and constraints were identified, and whether Shopify and Search were routed appropriately. Inspect the sidebar console for keypress-to-first-chip timing. Two seconds is the target for the first useful label. Track answer latency separately, from chip click to explanation.

@@ -77,7 +77,13 @@ kbd { display: grid; place-items: center; min-width: 28px; height: 27px; border:
 .lookup-body .web-card { margin-top: 0; }
 .citation { margin-left: 2px; background: #303953; text-decoration: none; font-size: 10px; border-radius: 4px; padding: 1px 4px; vertical-align: 1px; display: inline-block; }
 .search-suggestions { height: 55px; width: 100%; border: none; margin-top: 6px; }
-.product-grid { display: grid; gap: 7px; }
+.product-grid, .destinations { display: grid; gap: 7px; }
+.destination { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px; align-items: start; padding: 11px; background: var(--card); border: 1px solid var(--line); border-radius: 12px; text-decoration: none; overflow-wrap: anywhere; }
+.destination:hover { background: #151b29; border-color: #48689b; }
+.destination-copy { display: grid; gap: 3px; }
+.destination-title { color: var(--accent); font-size: 13px; font-weight: 620; }
+.destination-site { color: var(--muted); font-size: 11px; }
+.destination-reason { color: var(--ink); font-size: 12px; line-height: 1.4; }
 .product { display: grid; grid-template-columns: 49px minmax(0, 1fr) 10px; align-items: center; gap: 8px; background: var(--card); border: 1px solid var(--line); border-radius: 12px; color: var(--ink); padding: 8px; text-decoration: none; }
 .product:hover { background: #272c3e; border-color: #6678a6; }
 .product img, .product-placeholder { width: 49px; height: 49px; border-radius: 7px; object-fit: contain; background: #2c3248; }

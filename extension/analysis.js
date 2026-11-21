@@ -23,7 +23,9 @@ function modelEvidence(result) {
     const query = clean(entry?.query, 220);
     const title = clean(entry?.title, 60);
     const label = clean(entry?.label, 80);
-    return query && title && label ? [{ id: "web-" + index, title, label, query }] : [];
+    const kind = clean(entry?.kind, 20);
+    const evidence = clean(entry?.evidence, 240);
+    return query && title && label && kind && evidence ? [{ id: "web_" + index, title, label, query, kind, evidence }] : [];
   });
   return { summary: clean(result.summary, 400), product, webQueries };
 }
@@ -36,7 +38,7 @@ async function runLookups(providers, evidence, signal, send) {
   });
   if (!routing || signal.aborted) return;
   const product = routing.shop >= minimumYes ? evidence.product : null;
-  const queries = routing.web >= minimumYes ? evidence.webQueries : [];
+  const queries = evidence.webQueries.filter((query) => routing[query.id] >= minimumYes);
   const links = [...(product ? [product] : []), ...queries].map(({ id, title, label }) => ({ id, title, label }));
   if (links.length) send("lookup", { links });
 
@@ -50,7 +52,7 @@ async function runLookups(providers, evidence, signal, send) {
   };
   await Promise.all([
     product && search("shop", product, () => providers.shop(product, signal)),
-    ...queries.map((query) => search("web", query, () => providers.search([query], evidence.summary, signal))),
+    ...queries.map((query) => search("web", query, () => providers.search(query, signal))),
   ]);
 }
 

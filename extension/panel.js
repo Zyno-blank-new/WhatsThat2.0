@@ -194,12 +194,16 @@ function replaceSuggestions(sections) {
     trigger.remove();
     chipEntries.delete(key);
   }
+  pruneEmptyGroups();
+  showSections(sections);
+}
+
+function pruneEmptyGroups() {
   for (const [key, group] of chipGroups) {
     if (group.chips.children.length || group.lookups.children.length) continue;
     group.block.remove();
     chipGroups.delete(key);
   }
-  showSections(sections);
 }
 
 async function refineSuggestions(providers, value, signal) {
@@ -261,9 +265,38 @@ function showShop({ id, items, warnings }) {
   for (const message of warnings) block.append(make("p", "notice", message));
 }
 
-function showWeb({ id, blocks, suggestions, searched }) {
+function showDestinations(block, destinations) {
+  const list = make("div", "destinations");
+  for (const { title, reason, url, site } of destinations) {
+    const card = link(url, "destination");
+    if (!card) continue;
+    const copy = make("span", "destination-copy");
+    copy.append(make("span", "destination-title", title),
+      make("span", "destination-site", site), make("span", "destination-reason", reason));
+    const arrow = make("span", "product-arrow", "↗");
+    arrow.setAttribute("aria-hidden", "true");
+    card.append(copy, arrow);
+    list.append(card);
+  }
+  if (list.children.length) block.append(list);
+  else block.append(make("p", "results-empty", "No matching destination found."));
+}
+
+function showWeb({ id, blocks, destinations, suggestions, searched }) {
   const block = finishLookup(id);
   if (!block) return;
+  if (destinations) {
+    const lookup = block.parentElement;
+    if (!destinations.length && !lookup.open && !lookup.contains(document.activeElement)) {
+      lookup.remove();
+      lookupEntries.delete(id);
+      pruneEmptyGroups();
+      return;
+    }
+    showDestinations(block, destinations);
+    if (destinations.length) appendSearchSuggestions(block, suggestions);
+    return;
+  }
   if (!blocks.length || !searched) {
     block.append(make("p", "results-empty", "Google Search returned no grounded sources for this lookup."));
     return;
@@ -291,12 +324,17 @@ function showWeb({ id, blocks, suggestions, searched }) {
     paragraph.append(text.slice(index));
     card.append(paragraph);
   }
+  appendSearchSuggestions(block, suggestions);
+}
+
+function appendSearchSuggestions(block, suggestions) {
   for (const html of suggestions) {
     const frame = make("iframe", "search-suggestions");
     frame.title = "Google Search suggestions";
     frame.setAttribute("sandbox", "allow-popups allow-popups-to-escape-sandbox");
     frame.referrerPolicy = "no-referrer";
-    frame.srcdoc = '<meta http-equiv="Content-Security-Policy" content="default-src \'none\'; style-src \'unsafe-inline\'; img-src data: https:">' + html;
+    frame.srcdoc = '<meta name="color-scheme" content="dark">' +
+      '<meta http-equiv="Content-Security-Policy" content="default-src \'none\'; style-src \'unsafe-inline\'; img-src data: https:">' + html;
     block.append(frame);
   }
 }
