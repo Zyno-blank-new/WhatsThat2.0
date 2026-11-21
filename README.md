@@ -15,7 +15,7 @@ Lookback restores tab audio output and keeps a rolling WebM buffer in memory. Ch
 
 | Component | Hackathon implementation |
 |---|---|
-| Gemini 3.5 Flash-Lite | Uses the WebM clip to choose up to two initial chips and their headings, in parallel with Hydrogen. |
+| Gemini 3.5 Flash-Lite | Uses the WebM clip to plan early headings and prepare up to two instant answers, in parallel with Hydrogen. A clear named reference can start a gated lookup while Hydrogen is still analyzing the clip. |
 | Gemini 4 Hydrogen | Reads the clip and prioritizes its final two seconds. Chooses sections, questions, and likely next actions with evidence from the clip. Explains the topic on demand and identifies when a public source would help. |
 | Gemini Decision 1 | Identifies repeated topics and screens each lookup against its evidence in a single routing request. Approved lookups start automatically. |
 | Gemini 4 Neon | Uses Google Search grounding to find specific destinations and cite reviews, prices, and other factual answers. It also verifies selected chip and typed answers from a public text query. Independent approved searches run in parallel. |
@@ -24,6 +24,8 @@ Lookback restores tab audio output and keeps a rolling WebM buffer in memory. Ch
 The sidebar calls Gemini, the Decisions API, and Shopify directly. It starts with four skeleton sections for headings, chips, video, and links. Ready chips appear while lookups continue loading. The full analysis updates the initial suggestions while keeping any chip the user has opened. Direct cards can show cited research papers, Wikipedia biographies for named public figures, specific YouTube tutorials, official guides, tours, recipes, or exact ordering pages. Web destinations come from Google Search citations and open in a new tab. Each installation saves its own Gemini key in local Chrome extension storage, restricted to trusted extension pages. The WebM clip contains the tab’s video and audio and is the sole media input to Gemini. Uploads start after a shortcut, toolbar analyze action, or an answer request.
 
 The **Products** section is always visible. Relevant results from Shopify and exact products found at U.S. retailers appear together. When the current tab is an Amazon item page, the section can link to that exact listing. Each card opens the merchant’s listing. Retailer cards use a catalog photo when the product titles match, or a thumbnail cropped locally from the clip when the item was visible. A placeholder covers listings without a reliable image.
+
+Chip answers are prepared during the analysis and appear on click. A public fact can still receive cited verification in the background. Video cards use a YouTube thumbnail when the video ID is known or independently matched. Other links use a site favicon when available, with a built-in icon as a fallback.
 
 ## Verification and judging
 

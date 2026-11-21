@@ -1,4 +1,5 @@
-import { answerMoment, inspectMoment } from "./analysis.js";
+import { answerMoment, inspectMoment, plainAnswer, verifyAnswer } from "./analysis.js";
+import { matchingVideoThumbnail, siteIcon, youtubeThumbnail, youtubeVideoId } from "./card-images.js";
 import { productThumbnail } from "./clip-image.js";
 import { getGeminiKey, setupKeySettings } from "./key-settings.js";
 import { createProviders } from "./providers.js";
@@ -67,7 +68,7 @@ function setStatus(message, style = "") {
 }
 
 function updateSkeletons() {
-  ui.skeleton.hidden = !sectionsPending && !routingPending;
+  ui.skeleton.hidden = (!sectionsPending && !routingPending) || Boolean(ui.sections.querySelector(".planned-skeleton"));
   const filled = Math.min(chipGroups.size, ui.skeleton.children.length - 1);
   for (const [index, row] of [...ui.skeleton.children].entries()) row.hidden = index < filled;
 }
@@ -83,6 +84,7 @@ function startLoading(message) {
 function analysisError(message) {
   sectionsPending = false;
   routingPending = false;
+  clearPlannedSections();
   setStatus(message, "error");
   if (!productUrls.size) setProductStatus("Capture another moment to find related products.");
   updateSkeletons();
@@ -186,21 +188,28 @@ function paintChipAnswer(group) {
 async function answerChip(group, item) {
   const snapshot = moment;
   const signal = controller?.signal;
-  if (!snapshot || !signal || item.pending || item.answer) return;
-  item.pending = true;
+  if (!snapshot || !signal || item.pending || item.researching || (item.answer && !item.sourceQuery)) return;
+  item.pending = !item.answer;
+  item.researching = Boolean(item.answer);
   item.error = "";
   paintChipAnswer(group);
   try {
     const apiKey = await getGeminiKey();
     if (signal.aborted) return;
     if (!apiKey) throw new Error("Save your Gemini API key in Settings to open answers.");
-    item.answer = await answerMoment(createProviders({ apiKey }), snapshot, item.question, [], signal, (draft) => {
-      if (signal.aborted) return;
-      item.answer = draft;
-      item.pending = false;
-      item.researching = true;
-      if (group.selected === item) paintChipAnswer(group);
-    });
+    const providers = createProviders({ apiKey });
+    if (item.answer) {
+      item.answer = await verifyAnswer(providers, item.answer.answer, item.sourceQuery, signal);
+      item.sourceQuery = "";
+    } else {
+      item.answer = await answerMoment(providers, snapshot, item.question, [], signal, (draft) => {
+        if (signal.aborted) return;
+        item.answer = draft;
+        item.pending = false;
+        item.researching = true;
+        if (group.selected === item) paintChipAnswer(group);
+      });
+    }
   } catch (error) {
     if (!signal.aborted) item.error = error.message;
   } finally {
@@ -212,12 +221,13 @@ async function answerChip(group, item) {
 
 function showSections(sections) {
   for (const { title, chips } of sections) {
-    for (const { label, question } of chips) {
+    for (const { label, question, answer, sourceQuery } of chips) {
       const key = chipKey(label);
       const questionKey = chipKey(question);
       if (!key || chipEntries.has(key) || [...chipEntries.values()].some((entry) => entry.questionKey === questionKey)) continue;
       const group = getGroup(title, true);
-      const item = { label, question };
+      clearPlannedGroup(group);
+      const item = { label, question, answer: answer ? plainAnswer(answer) : null, sourceQuery };
       const trigger = make("button", "chip", label);
       trigger.type = "button";
       trigger.setAttribute("aria-expanded", "false");
@@ -243,6 +253,41 @@ function showSections(sections) {
   updateSkeletons();
 }
 
+function showPlan(sections) {
+  if (!sections.length) return;
+  showSections(sections);
+  for (const { title, layout, chips } of sections) {
+    if (chips.length) continue;
+    const group = getGroup(title, layout === "chips");
+    if (group.placeholder || group.chips.children.length || group.lookups.children.length) continue;
+    const placeholder = make("div", "planned-skeleton");
+    placeholder.setAttribute("aria-hidden", "true");
+    if (layout === "chips") {
+      placeholder.classList.add("chips");
+      placeholder.append(make("span", "skeleton skeleton-chip"), make("span", "skeleton skeleton-chip"));
+    } else {
+      placeholder.classList.add("skeleton-card");
+      if (layout === "video") placeholder.append(make("span", "skeleton skeleton-thumbnail"));
+      const lines = make("span", "skeleton-lines");
+      lines.append(make("span", "skeleton"), make("span", "skeleton"));
+      placeholder.append(lines);
+    }
+    group.block.append(placeholder);
+    group.placeholder = placeholder;
+  }
+  updateSkeletons();
+}
+
+function clearPlannedGroup(group) {
+  group.placeholder?.remove();
+  group.placeholder = null;
+}
+
+function clearPlannedSections() {
+  for (const group of chipGroups.values()) clearPlannedGroup(group);
+  pruneEmptyGroups();
+}
+
 function replaceSuggestions(sections) {
   // A reader can keep using the first chip while the complete analysis arrives.
   for (const [key, { item, trigger }] of chipEntries) {
@@ -256,7 +301,7 @@ function replaceSuggestions(sections) {
 
 function pruneEmptyGroups() {
   for (const [key, group] of chipGroups) {
-    if (group.chips.children.length || group.lookups.children.length) continue;
+    if (group.placeholder || group.chips.children.length || group.lookups.children.length) continue;
     group.block.remove();
     chipGroups.delete(key);
   }
@@ -264,14 +309,24 @@ function pruneEmptyGroups() {
 
 async function refineSuggestions(providers, value, signal) {
   const previews = [...chipEntries.values()];
-  const chips = [...previews.map((entry) => entry.item), ...value.sections.flatMap((section) => section.chips)];
+  const final = value.sections.flatMap((section) => section.chips);
+  const chips = [...previews.map((entry) => entry.item), ...final];
+  receiveAnalysis({ type: "context", ...value });
   const matches = await providers.sameTopics(chips, signal).catch(() => new Set());
-  if (signal.aborted) return;
+  if (signal.aborted || !matches.size) return;
   const retained = previews.flatMap(({ item, trigger }, index) => (
     item.used || trigger === document.activeElement ? [index] : []
   ));
   const sections = distinctTopics(value.sections, previews.length, retained, matches);
-  receiveAnalysis({ type: "context", ...value, sections });
+  const remaining = new Set(sections.flatMap((section) => section.chips.map((chip) => chipKey(chip.label))));
+  for (const chip of final) {
+    const key = chipKey(chip.label);
+    const entry = chipEntries.get(key);
+    if (remaining.has(key) || !entry || entry.item.used || entry.trigger === document.activeElement) continue;
+    entry.trigger.remove();
+    chipEntries.delete(key);
+  }
+  pruneEmptyGroups();
 }
 
 function mountLookups(links) {
@@ -284,6 +339,7 @@ function mountLookups(links) {
       continue;
     }
     const group = getGroup(title);
+    clearPlannedGroup(group);
     const inline = kind !== "answer";
     const body = make("div", inline ? "lookup-inline" : "lookup-body");
     body.setAttribute("role", "status");
@@ -329,6 +385,7 @@ function showShop({ id, items, warnings = [], suggestions = [], visual }) {
     if (id === "catalog" && photoKey && source) catalogImages.set(photoKey, source);
     const placeholder = make("span", "product-placeholder");
     placeholder.setAttribute("aria-hidden", "true");
+    if (!source) addCardImage(placeholder, siteIcon(item.merchant) || siteIcon(new URL(card.href).hostname));
     if (!source && id !== "catalog") {
       if (photoKey) pendingProductImages.set(placeholder, photoKey);
       if (visual) placeholders.push(placeholder);
@@ -388,11 +445,22 @@ function showDestinations(block, destinations) {
   const kind = block.dataset.kind;
   const video = kind === "video";
   const type = { paper: "Research paper", person: "Biography", video: "Video", visit: "Visitor information", order: "Ordering page" }[kind];
-  for (const { title, reason, url, site } of destinations) {
-    const card = link(url, "destination");
+  for (const { title, reason, url, site, videoUrl } of destinations) {
+    const card = link(url, video ? "destination destination-video" : "destination");
     if (!card) continue;
     const icon = make("span", video ? "destination-icon destination-preview" : "destination-icon destination-document");
     icon.setAttribute("aria-hidden", "true");
+    if (video) {
+      const videoId = youtubeVideoId(url);
+      if (videoId) addCardImage(icon, youtubeThumbnail(videoId));
+      else if (videoUrl && controller) {
+        void matchingVideoThumbnail(videoUrl, title, controller.signal).then((url) => {
+          if (url && icon.isConnected) addCardImage(icon, url);
+        });
+      }
+    } else {
+      addCardImage(icon, siteIcon(site));
+    }
     const copy = make("span", "destination-copy");
     const meta = make("span", "destination-meta");
     if (type) meta.append(type + " · ");
@@ -406,6 +474,18 @@ function showDestinations(block, destinations) {
   }
   if (list.children.length) block.append(list);
   return Boolean(list.children.length);
+}
+
+function addCardImage(icon, url) {
+  if (!url) return;
+  const image = make("img");
+  image.alt = "";
+  image.loading = "lazy";
+  image.referrerPolicy = "no-referrer";
+  image.addEventListener("load", () => icon.classList.add("has-image"), { once: true });
+  image.addEventListener("error", () => image.remove(), { once: true });
+  image.src = url;
+  icon.append(image);
 }
 
 function showWeb({ id, blocks, destinations, suggestions, searched }) {
@@ -501,6 +581,7 @@ function appendSearchSuggestions(block, suggestions) {
 }
 
 function receiveAnalysis(event) {
+  if (event.type === "preview") showPlan(event.sections);
   if (event.type === "context") {
     sectionsPending = false;
     if (!event.productCandidate) updateProducts();
@@ -509,10 +590,13 @@ function receiveAnalysis(event) {
     updateSkeletons();
   }
   if (event.type === "lookup") {
-    routingPending = false;
     mountLookups(event.links);
-    updateProducts();
-    setStatus();
+    if (!event.preview) {
+      routingPending = false;
+      clearPlannedSections();
+      updateProducts();
+      setStatus();
+    }
     updateSkeletons();
   }
   if (event.type === "shop") showShop(event);
@@ -527,6 +611,7 @@ function receiveAnalysis(event) {
   if (event.type === "error") analysisError(event.error);
   if (event.type === "done") {
     routingPending = false;
+    clearPlannedSections();
     if (!ui.status.classList.contains("error")) updateProducts();
     if (!sectionsPending && !ui.status.classList.contains("error")) {
       setStatus(chipGroups.size || productUrls.size ? undefined : "There was too little context for specific suggestions.");
@@ -544,22 +629,12 @@ async function consumeAnalysis(snapshot, signal) {
       return;
     }
     const providers = createProviders({ apiKey });
-    let fullAnalysisReady = false;
-    void providers.quickChips(snapshot, signal).then((sections) => {
-      if (signal.aborted || fullAnalysisReady || !sections.length) return;
-      replaceSuggestions(sections);
-      if (!sectionsPending && !routingPending && !ui.status.classList.contains("error")) setStatus();
-    }).catch(() => {
-      // Hydrogen can still supply chips when the quick request fails.
-    });
     await inspectMoment(providers, snapshot, signal, (type, value) => {
       if (signal.aborted) return;
       if (type === "context" && value.sections.length && chipEntries.size) {
-        fullAnalysisReady = true;
         void refineSuggestions(providers, value, signal);
         return;
       }
-      if (type === "context" && value.sections.length) fullAnalysisReady = true;
       receiveAnalysis({ type, ...value });
     });
   } catch (error) {

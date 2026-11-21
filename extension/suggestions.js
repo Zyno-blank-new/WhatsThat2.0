@@ -9,7 +9,7 @@ export function chipKey(value) {
     .replace(/\s+/g, " ").trim().replace(/[.?!]+$/, "");
 }
 
-export function normalizeSections(sections, limit) {
+export function normalizeSections(sections, limit, plan = false) {
   if (!Array.isArray(sections)) return [];
   const labels = new Set();
   const questions = new Set();
@@ -28,9 +28,14 @@ export function normalizeSections(sections, limit) {
       if (!labelKey || !questionKey || vagueLabels.has(labelKey) || labels.has(labelKey) || questions.has(questionKey)) continue;
       labels.add(labelKey);
       questions.add(questionKey);
-      chips.push({ label, question });
+      const answer = typeof entry.answer === "string" ? entry.answer.trim().slice(0, 420) : "";
+      const sourceQuery = typeof entry.sourceQuery === "string" ? entry.sourceQuery.trim().slice(0, 240) : "";
+      chips.push({ label, question, ...(answer ? { answer } : {}), ...(sourceQuery ? { sourceQuery } : {}) });
     }
-    if (chips.length) result.push({ title, chips });
+    if (chips.length || plan) {
+      const layout = ["chips", "video", "link"].includes(section.layout) ? section.layout : "chips";
+      result.push(plan ? { title, layout, chips } : { title, chips });
+    }
   }
   return result;
 }

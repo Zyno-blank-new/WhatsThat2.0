@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { answerMoment, inspectMoment } from "../extension/analysis.js";
+import { siteIcon, youtubeThumbnail, youtubeVideoId } from "../extension/card-images.js";
 import { createProviders } from "../extension/providers.js";
 import { amazonItemUrl, productPhotoKey } from "../extension/products.js";
 import { parseGeminiKeyFile } from "../extension/key-settings.js";
@@ -27,7 +28,7 @@ test("Hydrogen gets only the playable video as context and prioritizes its endin
     ]);
     assert.match(request.system_instruction, /final two seconds as the strongest signal/);
     const chip = request.response_format.schema.properties.sections.items.properties.chips.items;
-    assert.deepEqual(Object.keys(chip.properties), ["label", "question"]);
+    assert.deepEqual(Object.keys(chip.properties), ["label", "question", "answer", "sourceQuery"]);
     const lookup = request.response_format.schema.properties.webQueries.items;
     assert.deepEqual(lookup.properties.kind.enum, ["answer", "video", "visit", "order", "page", "paper", "person"]);
     assert.equal(request.response_format.schema.properties.webQueries.maxItems, 5);
@@ -42,9 +43,11 @@ test("Hydrogen gets only the playable video as context and prioritizes its endin
   });
 });
 
-test("the quick request uses video and preserves the model's choice of sections", async () => {
-  const chip = { label: "Hydrostatic head", question: "What does hydrostatic head say about this fabric?" };
-  const sections = [{ title: "Fabric specs", chips: [chip] }];
+test("the quick request returns section names, instant answers, and placeholders", async () => {
+  const chip = { label: "Hydrostatic head", question: "What does hydrostatic head say about this fabric?",
+    answer: "It measures the water pressure the fabric can resist." };
+  const sections = [{ title: "Fabric specs", layout: "chips", chips: [chip] },
+    { title: "Waterproofing demonstration", layout: "video", chips: [] }];
   const providers = createProviders({ apiKey: "test-key", fetcher: async (_url, options) => {
     const request = JSON.parse(options.body);
     assert.equal(options.priority, "high");
@@ -52,16 +55,42 @@ test("the quick request uses video and preserves the model's choice of sections"
     assert.equal(request.generation_config.thinking_level, "minimal");
     assert.deepEqual(request.input.map((item) => item.type), ["video", "text"]);
     assert.deepEqual(request.input[0].processing, { type: "static", fps: 1 });
-    assert.match(request.system_instruction, /final two seconds as the strongest signal/);
+    assert.match(request.system_instruction, /greatest weight to the last two seconds/);
     const properties = request.response_format.schema.properties;
-    assert.deepEqual(Object.keys(properties), ["sections"]);
-    assert.equal(properties.sections.maxItems, 2);
-    assert.deepEqual(Object.keys(properties.sections.items.properties.chips.items.properties), ["label", "question"]);
+    assert.deepEqual(Object.keys(properties), ["sections", "webQueries"]);
+    assert.equal(properties.sections.maxItems, 4);
+    assert.equal(properties.webQueries.maxItems, 1);
+    assert.deepEqual(Object.keys(properties.sections.items.properties.chips.items.properties), ["label", "question", "answer", "sourceQuery"]);
     return Response.json({ steps: [{ type: "model_output", content: [{
-      type: "text", text: JSON.stringify({ sections }),
+      type: "text", text: JSON.stringify({ sections, webQueries: [] }),
     }] }] });
   } });
-  assert.deepEqual(await providers.quickChips(moment, new AbortController().signal), sections);
+  assert.deepEqual(await providers.quickPlan(moment, new AbortController().signal), { sections, webQueries: [] });
+});
+
+test("an early search starts before video analysis and is reused by the final plan", async () => {
+  const { promise, resolve } = Promise.withResolvers();
+  const reference = { title: "People", layout: "link", chips: [] };
+  const lookup = { title: "People", kind: "person", subject: "Stanisław Ulam", label: "Ulam biography",
+    query: "Stanisław Ulam mathematician Wikipedia", evidence: "The video names Ulam." };
+  const events = [];
+  const calls = [];
+  const providers = {
+    quickPlan: async () => ({ sections: [reference], webQueries: [lookup] }),
+    analyze: () => promise,
+    decide: async ({ webQueries }) => Object.fromEntries(webQueries.map(({ id }) => [id, 0.9])),
+    search: async ({ id }) => {
+      calls.push(id);
+      resolve({ sections: [], product: null, webQueries: [{ ...lookup, subject: "Stanislaw Ulam" }] });
+      return { destinations: [{ title: "Stanisław Ulam", url: "https://en.wikipedia.org/wiki/Stanis%C5%82aw_Ulam" }], suggestions: [] };
+    },
+  };
+  await inspectMoment(providers, moment, AbortSignal.timeout(1000), (type, value) => events.push({ type, ...value }));
+  assert.deepEqual(calls, ["preview_0"]);
+  assert.deepEqual(events[0], { type: "preview", sections: [reference] });
+  assert.equal(events[1].preview, true);
+  assert(events.findIndex(({ type }) => type === "lookup") < events.findIndex(({ type }) => type === "context"));
+  assert.equal(events.filter(({ type }) => type === "web").length, 1);
 });
 
 test("chip answers use the video to give explanations and can request public verification", async () => {
@@ -252,7 +281,8 @@ test("Neon action results use citation URLs for specific destinations, including
   const redirect = "https://vertexaisearch.cloud.google.com/grounding-api-redirect/grounded-video";
   const direct = "https://www.youtube.com/watch?v=spUNpyF58BY";
   const titles = ["No source", "FFT — a visual guide", "FFT | Worked example", "Search results", "Unsafe URL"];
-  const lines = titles.map((title) => title + " | One useful step.");
+  const lines = titles.map((title, index) => title + " | One useful step." +
+    (index === 1 ? " | https://www.youtube.com/watch?v=Q-YNk18TA2M" : ""));
   const urls = ["", redirect, direct, "https://www.youtube.com/results?search_query=fft", "javascript:alert(1)"];
   let offset = 0;
   const annotations = lines.flatMap((line, i) => {
@@ -274,11 +304,23 @@ test("Neon action results use citation URLs for specific destinations, including
   const result = await providers.search({ kind: "video", query: "visual FFT tutorial" }, new AbortController().signal);
   assert.deepEqual(result, {
     destinations: [
-      { title: titles[1], reason: "One useful step.", url: redirect, site: "youtube.com" },
+      { title: titles[1], reason: "One useful step.", url: redirect, site: "youtube.com", videoUrl: "https://www.youtube.com/watch?v=Q-YNk18TA2M" },
       { title: titles[2], reason: "One useful step.", url: direct, site: "youtube.com" },
     ],
     suggestions: ["<div>FFT</div>"],
   });
+});
+
+test("card artwork is scoped to the exact video or a public site icon", () => {
+  const id = "spUNpyF58BY";
+  assert.equal(youtubeVideoId("https://www.youtube.com/watch?v=" + id), id);
+  assert.equal(youtubeVideoId("https://youtube.com/shorts/" + id), id);
+  assert.equal(youtubeVideoId("https://youtu.be/" + id), id);
+  assert.equal(youtubeVideoId("https://www.youtube.com/results?v=" + id), null);
+  assert.equal(youtubeVideoId("https://youtube.com.invalid/watch?v=" + id), null);
+  assert.equal(youtubeThumbnail(id), "https://i.ytimg.com/vi/spUNpyF58BY/mqdefault.jpg");
+  assert.equal(siteIcon("wikipedia.org"), "https://wikipedia.org/favicon.ico");
+  assert.equal(siteIcon("app.internal"), null);
 });
 
 test("without a valid grounding citation, prose and generic URLs cannot become action links", async () => {
