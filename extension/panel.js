@@ -360,11 +360,19 @@ function showWeb({ id, blocks, destinations, suggestions, searched }) {
   appendSearchSuggestions(block, suggestions);
 }
 
-function paintAnswer(container, { blocks, suggestions }, researching = false) {
+function paintAnswer(container, { answer, blocks, suggestions }, researching = false) {
   container.replaceChildren();
   container.removeAttribute("aria-busy");
-  appendCitedText(container, blocks);
-  appendSearchSuggestions(container, suggestions);
+  let sourceContainer = container;
+  const long = blocks.reduce((count, block) => count + (block.text?.length ?? 0), 0) > 700;
+  if (long && blocks.some((block) => block.citations.length)) {
+    appendCitedText(container, [{ text: answer, citations: [] }]);
+    sourceContainer = make("details", "answer-details");
+    sourceContainer.append(make("summary", "", "Sources and more detail"));
+    container.append(sourceContainer);
+  }
+  appendCitedText(sourceContainer, blocks);
+  appendSearchSuggestions(sourceContainer, suggestions);
   if (researching) {
     const pending = make("span", "answer-source-pending");
     const bar = make("span", "skeleton");

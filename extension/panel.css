@@ -74,6 +74,9 @@ kbd { display: grid; place-items: center; min-width: 28px; height: 27px; border:
 .turn-answer { overflow-wrap: anywhere; white-space: pre-wrap; font-size: 12px; line-height: 1.55; }
 .answer-source-pending { display: block; width: 34%; margin-top: 8px; }
 .answer-source-pending .skeleton { height: 7px; }
+.answer-details { margin-top: 8px; }
+.answer-details summary { color: var(--accent); cursor: pointer; font-weight: 620; }
+.answer-details[open] summary { margin-bottom: 6px; }
 .lookup { min-width: 0; max-width: 100%; }
 .lookup[open] { flex-basis: 100%; }
 .lookup summary { display: inline-block; cursor: pointer; }
