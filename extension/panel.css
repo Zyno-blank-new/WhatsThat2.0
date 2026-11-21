@@ -69,8 +69,11 @@ kbd { display: grid; place-items: center; min-width: 28px; height: 27px; border:
 @keyframes shimmer { to { background-position: 0 0; } }
 .answer, .web-card, .turn { margin-top: 8px; padding: 11px; border: 1px solid var(--line); border-radius: 12px; background: var(--card); overflow-wrap: anywhere; }
 .answer, .web-card p, .turn p, .results-empty { font-size: 12px; line-height: 1.55; white-space: pre-wrap; }
-.web-card p, .turn p, .results-empty { margin: 0; }
-.turn p + p, .web-card p + p { margin-top: 6px; }
+.answer p, .web-card p, .turn p, .results-empty { margin: 0; }
+.answer p + p, .turn p + p, .web-card p + p, .turn-answer { margin-top: 6px; }
+.turn-answer { overflow-wrap: anywhere; white-space: pre-wrap; font-size: 12px; line-height: 1.55; }
+.answer-source-pending { display: block; width: 34%; margin-top: 8px; }
+.answer-source-pending .skeleton { height: 7px; }
 .lookup { min-width: 0; max-width: 100%; }
 .lookup[open] { flex-basis: 100%; }
 .lookup summary { display: inline-block; cursor: pointer; }
@@ -80,7 +83,10 @@ kbd { display: grid; place-items: center; min-width: 28px; height: 27px; border:
 .lookup-inline { flex-basis: 100%; min-width: 0; }
 .lookup-body .web-card { margin-top: 0; }
 .citation { margin-left: 2px; background: #303953; text-decoration: none; font-size: 10px; border-radius: 4px; padding: 1px 4px; vertical-align: 1px; display: inline-block; }
-.search-suggestions { height: 55px; width: 100%; border: none; margin-top: 6px; }
+.search-rail { display: flex; gap: 7px; margin-top: 6px; overflow-x: auto; scroll-snap-type: x mandatory; scrollbar-width: thin; }
+.search-suggestions { display: block; flex: 0 0 100%; min-width: 0; height: 55px; border: none; scroll-snap-align: start; }
+.search-rail:focus-visible { outline-offset: -2px; }
+.search-rail:has(.search-suggestions + .search-suggestions) .search-suggestions { flex-basis: calc(100% - 24px); }
 .product-grid, .destinations { display: grid; gap: 7px; }
 .destination { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px; align-items: start; padding: 11px; background: var(--card); border: 1px solid var(--line); border-radius: 12px; text-decoration: none; overflow-wrap: anywhere; }
 .destination:hover { background: #151b29; border-color: #48689b; }

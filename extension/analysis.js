@@ -68,3 +68,13 @@ export async function inspectMoment(providers, moment, signal, send) {
     if (!signal.aborted) send("done");
   }
 }
+
+export async function answerMoment(providers, moment, question, recent, signal, preview) {
+  const { answer, searchQuery } = await providers.followUp(moment, question, recent, signal);
+  const fallback = { answer, blocks: [{ text: answer, citations: [] }], suggestions: [] };
+  if (!searchQuery || signal.aborted) return fallback;
+  preview(fallback);
+  const grounded = await providers.search({ kind: "answer", query: searchQuery }, signal).catch(() => null);
+  return grounded?.searched && grounded.blocks.some((block) => block.citations.length)
+    ? { ...grounded, answer } : fallback;
+}

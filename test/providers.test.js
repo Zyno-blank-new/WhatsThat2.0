@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { inspectMoment } from "../extension/analysis.js";
+import { answerMoment, inspectMoment } from "../extension/analysis.js";
 import { createProviders } from "../extension/providers.js";
 import { parseGeminiKeyFile } from "../extension/key-settings.js";
 import { distinctTopics, normalizeSections } from "../extension/suggestions.js";
@@ -63,17 +63,50 @@ test("the quick request uses video and preserves the model's choice of sections"
   assert.deepEqual(await providers.quickChips(moment, new AbortController().signal), sections);
 });
 
-test("chip answers send the question and the same video context", async () => {
+test("chip answers use the video to give explanations and can request public verification", async () => {
   const providers = createProviders({ apiKey: "test-key", fetcher: async (_url, options) => {
     const request = JSON.parse(options.body);
     assert.deepEqual(request.input.map((item) => item.type), ["video", "text"]);
     assert.equal(request.input[0].data, "Yg==");
     assert.match(request.input[1].text, /What does this rating mean\?/);
     assert.doesNotMatch(request.input[1].text, /Gear review|example\.com/);
-    return Response.json({ output_text: "It describes the fabric’s water resistance." });
+    assert.match(request.system_instruction, /add established background/);
+    assert.deepEqual(request.response_format.schema.required, ["answer", "searchQuery"]);
+    return Response.json({ output_text: JSON.stringify({
+      answer: "It describes the fabric’s water resistance.", searchQuery: null,
+    }) });
   } });
   const answer = await providers.followUp(moment, "What does this rating mean?", [], new AbortController().signal);
-  assert.equal(answer, "It describes the fabric’s water resistance.");
+  assert.deepEqual(answer, { answer: "It describes the fabric’s water resistance.", searchQuery: "" });
+});
+
+test("a named organization can get a cited answer without sending the video to Search", async () => {
+  const question = "What is JSAP and why might presenting there have mattered?";
+  const answer = "JSAP is a scientific society that provides a venue for presenting applied physics research.";
+  const query = "What role did the Japan Society of Applied Physics have in early EUV lithography research?";
+  const cited = { text: "The Japan Society of Applied Physics publishes applied physics research.",
+    citations: [{ url: "https://www.jsap.or.jp/english/", title: "Japan Society of Applied Physics" }] };
+  const signal = new AbortController().signal;
+  const calls = [];
+  const providers = {
+    followUp: async (captured, asked) => {
+      assert.equal(captured, moment);
+      assert.equal(asked, question);
+      return { answer, searchQuery: query };
+    },
+    search: async (lookup) => {
+      calls.push(lookup);
+      return { searched: true, blocks: [cited], suggestions: ["<div>search</div>"] };
+    },
+  };
+  const preview = (draft) => calls.push(draft.blocks[0].text);
+  const result = await answerMoment(providers, moment, question, [], signal, preview);
+  assert.deepEqual(calls, [answer, { kind: "answer", query }]);
+  assert.deepEqual(result, { answer, searched: true, blocks: [cited], suggestions: ["<div>search</div>"] });
+
+  providers.search = async () => ({ searched: true, blocks: [{ text: "Uncited rewrite", citations: [] }], suggestions: [] });
+  const fallback = await answerMoment(providers, moment, question, [], signal, preview);
+  assert.deepEqual(fallback.blocks, [{ text: answer, citations: [] }]);
 });
 
 test("lookup sections and chip labels come from the model and gated searches route separately", async () => {

@@ -1,4 +1,4 @@
-import { inspectMoment } from "./analysis.js";
+import { answerMoment, inspectMoment } from "./analysis.js";
 import { getGeminiKey, setupKeySettings } from "./key-settings.js";
 import { createProviders } from "./providers.js";
 import { chipKey, distinctTopics } from "./suggestions.js";
@@ -154,8 +154,10 @@ function paintChipAnswer(group) {
   group.answer.hidden = !selected;
   if (selected?.pending) {
     showPending(group.answer, "Looking up this answer…");
+  } else if (selected?.answer) {
+    paintAnswer(group.answer, selected.answer, selected.researching);
   } else {
-    group.answer.textContent = selected?.answer || selected?.error || "";
+    group.answer.textContent = selected?.error || "";
     group.answer.removeAttribute("aria-busy");
   }
 }
@@ -171,12 +173,18 @@ async function answerChip(group, item) {
     const apiKey = await getGeminiKey();
     if (signal.aborted) return;
     if (!apiKey) throw new Error("Save your Gemini API key in Settings to open answers.");
-    const answer = await createProviders({ apiKey }).followUp(snapshot, item.question, [], signal);
-    item.answer = answer.replace(/\*\*([^*\n]+)\*\*/g, "$1");
+    item.answer = await answerMoment(createProviders({ apiKey }), snapshot, item.question, [], signal, (draft) => {
+      if (signal.aborted) return;
+      item.answer = draft;
+      item.pending = false;
+      item.researching = true;
+      if (group.selected === item) paintChipAnswer(group);
+    });
   } catch (error) {
     if (!signal.aborted) item.error = error.message;
   } finally {
     item.pending = false;
+    item.researching = false;
     if (!signal.aborted && group.selected === item) paintChipAnswer(group);
   }
 }
@@ -348,6 +356,25 @@ function showWeb({ id, blocks, destinations, suggestions, searched }) {
   }
   const card = make("div", "web-card");
   block.append(card);
+  appendCitedText(card, blocks);
+  appendSearchSuggestions(block, suggestions);
+}
+
+function paintAnswer(container, { blocks, suggestions }, researching = false) {
+  container.replaceChildren();
+  container.removeAttribute("aria-busy");
+  appendCitedText(container, blocks);
+  appendSearchSuggestions(container, suggestions);
+  if (researching) {
+    const pending = make("span", "answer-source-pending");
+    const bar = make("span", "skeleton");
+    bar.setAttribute("aria-hidden", "true");
+    pending.append(make("span", "visually-hidden", "Checking sources…"), bar);
+    container.append(pending);
+  }
+}
+
+function appendCitedText(container, blocks) {
   let sourceIndex = 0;
   for (const result of blocks) {
     const paragraph = make("p");
@@ -367,12 +394,18 @@ function showWeb({ id, blocks, destinations, suggestions, searched }) {
       }
     }
     paragraph.append(text.slice(index));
-    card.append(paragraph);
+    container.append(paragraph);
   }
-  appendSearchSuggestions(block, suggestions);
 }
 
 function appendSearchSuggestions(block, suggestions) {
+  if (!suggestions.length) return;
+  const rail = make("div", "search-rail");
+  if (suggestions.length > 1) {
+    rail.tabIndex = 0;
+    rail.setAttribute("role", "region");
+    rail.setAttribute("aria-label", "Google Search suggestions");
+  }
   for (const html of suggestions) {
     const frame = make("iframe", "search-suggestions");
     frame.title = "Google Search suggestions";
@@ -380,8 +413,9 @@ function appendSearchSuggestions(block, suggestions) {
     frame.referrerPolicy = "no-referrer";
     frame.srcdoc = '<meta name="color-scheme" content="dark">' +
       '<meta http-equiv="Content-Security-Policy" content="default-src \'none\'; style-src \'unsafe-inline\'; img-src data: https:">' + html;
-    block.append(frame);
+    rail.append(frame);
   }
+  block.append(rail);
 }
 
 function receiveAnalysis(event) {
@@ -541,17 +575,19 @@ ui.form.addEventListener("submit", async (event) => {
   ui.question.disabled = true;
   ui.ask.disabled = true;
   const turn = make("article", "turn");
-  const answer = make("p");
+  const answer = make("div", "turn-answer");
   answer.setAttribute("role", "status");
   showPending(answer, "Thinking…");
   turn.append(make("p", "question", question), answer);
   ui.conversation.append(turn);
   turn.scrollIntoView({ block: "nearest", behavior: "instant" });
   try {
-    const result = await createProviders({ apiKey }).followUp(snapshot, question, recent, signal);
+    const result = await answerMoment(createProviders({ apiKey }), snapshot, question, recent, signal, (draft) => {
+      if (!signal.aborted) paintAnswer(answer, draft, true);
+    });
     if (signal.aborted) return;
-    answer.textContent = result;
-    recent.push({ question, answer: result });
+    paintAnswer(answer, result);
+    recent.push({ question, answer: result.answer });
     recent = recent.slice(-6);
   } catch (error) {
     if (!signal.aborted) answer.textContent = error.message;
