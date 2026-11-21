@@ -1,3 +1,5 @@
+import { amazonItemUrl } from "./products.js";
+
 const panels = new Map();
 const jobs = new Map();
 const pausedTabs = new Set();
@@ -120,6 +122,7 @@ async function captureMoment(tab) {
   const job = {
     id: crypto.randomUUID(), capturedAt: Date.now(),
     title: tab.title || "Current tab", host: new URL(tab.url).hostname.replace(/^www\./, ""),
+    amazonItem: amazonItemUrl(tab.url),
   };
   jobs.set(windowId, job);
   emit(windowId, { type: "capturing", job: { ...job } });

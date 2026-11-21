@@ -9,15 +9,13 @@ function clean(value, limit) {
 function modelEvidence(result) {
   const candidate = result.product;
   const query = clean(candidate?.query, 240);
-  const title = clean(candidate?.title, 60);
-  const label = clean(candidate?.label, 80);
-  const product = query && title && label ? {
+  const evidence = clean(candidate?.evidence, 300);
+  const product = query && evidence ? {
     id: "catalog",
     kind: "shop",
-    title,
-    label,
     query,
-    evidence: clean(candidate.evidence, 300),
+    evidence,
+    exact: candidate.exact === true,
     maxUsd: Number.isFinite(candidate.maxUsd) ? candidate.maxUsd : null,
   } : null;
   const webQueries = result.webQueries.slice(0, 5).flatMap((entry, index) => {
@@ -31,7 +29,7 @@ function modelEvidence(result) {
   return { summary: clean(result.summary, 400), product, webQueries };
 }
 
-async function runLookups(providers, evidence, signal, send) {
+async function runLookups(providers, evidence, visual, amazonItem, signal, send) {
   if (!evidence.product && !evidence.webQueries.length) return;
   const routing = await providers.decide(evidence, signal).catch((error) => {
     if (!signal.aborted) send("warning", { message: error.message });
@@ -40,8 +38,16 @@ async function runLookups(providers, evidence, signal, send) {
   if (!routing || signal.aborted) return;
   const product = routing.shop >= minimumYes ? evidence.product : null;
   const queries = evidence.webQueries.filter((query) => routing[query.id] >= minimumYes);
-  const links = [...(product ? [product] : []), ...queries].map(({ id, title, label, kind }) => ({ id, title, label, kind }));
-  if (links.length) send("lookup", { links });
+  const retail = product?.exact ? { id: "retail", kind: "retail" } : null;
+  const currentAmazon = retail && amazonItem ? { id: "amazon-item", kind: "retail" } : null;
+  const links = queries.map(({ id, title, label, kind }) => ({ id, title, label, kind }));
+  if (product) links.unshift({ id: product.id, kind: "shop" });
+  if (retail) links.push(retail);
+  if (currentAmazon) links.unshift(currentAmazon);
+  send("lookup", { links });
+  if (currentAmazon) send("shop", {
+    id: currentAmazon.id, visual, items: [{ title: product.query, url: amazonItem, merchant: "amazon.com" }],
+  });
 
   const search = async (type, entry, operation) => {
     try {
@@ -53,6 +59,11 @@ async function runLookups(providers, evidence, signal, send) {
   };
   await Promise.all([
     product && search("shop", product, () => providers.shop(product, signal)),
+    retail && search("shop", retail, async () => {
+      const result = await providers.retail(product, signal);
+      const items = currentAmazon ? result.items.filter((item) => item.merchant !== "amazon.com") : result.items;
+      return { ...result, items, visual };
+    }),
     ...queries.map((query) => search("web", query, () => providers.search(query, signal))),
   ]);
 }
@@ -60,8 +71,9 @@ async function runLookups(providers, evidence, signal, send) {
 export async function inspectMoment(providers, moment, signal, send) {
   try {
     const result = await providers.analyze(moment, signal);
-    send("context", { sections: normalizeSections(result.sections, 5) });
-    await runLookups(providers, modelEvidence(result), signal, send);
+    const evidence = modelEvidence(result);
+    send("context", { sections: normalizeSections(result.sections, 5), productCandidate: Boolean(evidence.product) });
+    await runLookups(providers, evidence, result.product?.visual, moment.amazonItem, signal, send);
   } catch (error) {
     if (!signal.aborted) send("error", { error: error.message });
   } finally {

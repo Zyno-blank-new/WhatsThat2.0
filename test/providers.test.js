@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { answerMoment, inspectMoment } from "../extension/analysis.js";
 import { createProviders } from "../extension/providers.js";
+import { amazonItemUrl, productPhotoKey } from "../extension/products.js";
 import { parseGeminiKeyFile } from "../extension/key-settings.js";
 import { distinctTopics, normalizeSections } from "../extension/suggestions.js";
 
@@ -111,7 +112,8 @@ test("a named organization can get a cited answer without sending the video to S
 
 test("lookup sections and chip labels come from the model and gated searches route separately", async () => {
   const sections = [{ title: "Fabric specs", chips: [{ label: "Water column", question: "How is this rating measured?" }] }];
-  const product = { title: "Shop similar shells", label: "Packable rain jackets", query: "packable rain jacket" };
+  const visual = { seconds: 1, box: [100, 100, 500, 600] };
+  const product = { query: "named packable rain jacket", evidence: "The model name is visible.", exact: true, visual };
   const webQueries = [
     { title: "What reviewers say", label: "Trail performance", query: "named shell independent reviews", kind: "answer", evidence: "The shell is reviewed." },
     { title: "See the test", label: "Watch a spray test", query: "waterproof shell spray test tutorial YouTube", kind: "video", evidence: "The clip mentions a spray test." },
@@ -126,6 +128,11 @@ test("lookup sections and chip labels come from the model and gated searches rou
       calls.push(candidate.query);
       return { items: [], warnings: [] };
     },
+    retail: async (candidate) => {
+      calls.push("retail " + candidate.query);
+      assert.equal(Object.hasOwn(candidate, "visual"), false);
+      return { items: [], suggestions: [] };
+    },
     search: async (candidate) => {
       calls.push(candidate.query);
       return { blocks: [], suggestions: [] };
@@ -134,23 +141,39 @@ test("lookup sections and chip labels come from the model and gated searches rou
   const send = (type, payload) => events.push({ type, ...payload });
   const signal = new AbortController().signal;
   await inspectMoment(providers, moment, signal, send);
-  assert.deepEqual(events[0], { type: "context", sections });
+  assert.deepEqual(events[0], { type: "context", sections, productCandidate: true });
   assert.deepEqual(events[1], {
     type: "lookup",
     links: [
-      { id: "catalog", title: product.title, label: product.label, kind: "shop" },
+      { id: "catalog", kind: "shop" },
       ...[0, 2].map((index) => ({
         id: "web_" + index, title: webQueries[index].title, label: webQueries[index].label, kind: webQueries[index].kind,
       })),
+      { id: "retail", kind: "retail" },
     ],
   });
-  assert.deepEqual(calls, [product.query, webQueries[0].query, webQueries[2].query]);
-  assert.deepEqual(events.filter(({ id }) => id).map(({ id }) => id), ["catalog", "web_0", "web_2"]);
+  assert.deepEqual(calls, [product.query, "retail " + product.query, webQueries[0].query, webQueries[2].query]);
+  assert.deepEqual(events.filter(({ id }) => id).map(({ id }) => id).sort(), ["catalog", "retail", "web_0", "web_2"]);
+  assert.deepEqual(events.find(({ id }) => id === "retail").visual, visual);
 
   calls.length = 0;
   const blocked = { ...providers, decide: async () => ({ shop: 0.2, web_0: 0.1 }) };
   await inspectMoment(blocked, moment, signal, send);
   assert.deepEqual(calls, []);
+
+  const generic = { ...providers, analyze: async () => ({
+    sections, webQueries: [], product: { ...product, exact: false },
+  }) };
+  await inspectMoment(generic, moment, signal, send);
+  assert.deepEqual(calls, [product.query]);
+
+  const amazonItem = "https://www.amazon.com/dp/B0CFPJYX7P";
+  events.length = 0;
+  await inspectMoment(providers, { ...moment, amazonItem }, signal, send);
+  assert.deepEqual(events.find(({ id }) => id === "amazon-item"), {
+    type: "shop", id: "amazon-item", visual,
+    items: [{ title: product.query, url: amazonItem, merchant: "amazon.com" }],
+  });
 });
 
 test("vague labels and repeated questions are filtered across sections", () => {
@@ -321,7 +344,11 @@ test("Shopify Global Catalog MCP preserves the variant link and applies an expli
     return Response.json({ result: { structuredContent: {
       products: [{
         title: "Packable jacket",
-        variants: [{ url, price: { amount: 6400, currency: "USD" }, seller: { name: "Merchant" } }],
+        variants: [
+          { url: "https://example.com/products/jacket?variant=41", availability: { available: false } },
+          { url, price: { amount: 6400, currency: "USD" }, seller: { name: "Merchant" },
+            media: [{ type: "video", url: "https://example.com/clip.mp4" }, { type: "image", url: "https://example.com/jacket.jpg" }] },
+        ],
       }],
       messages: [{ type: "warning", content: "Some availability varies." }],
     } } });
@@ -329,8 +356,48 @@ test("Shopify Global Catalog MCP preserves the variant link and applies an expli
   const result = await providers.shop({ query: "packable rain jacket", maxUsd: 100 }, new AbortController().signal);
   assert.deepEqual(result, {
     warnings: ["Some availability varies."],
-    items: [{ title: "Packable jacket", price: "$64.00", merchant: "Merchant", image: null, url }],
+    items: [{ title: "Packable jacket", price: "$64.00", merchant: "Merchant", image: "https://example.com/jacket.jpg", url }],
   });
+});
+
+test("retail cards use specific ordering pages across retailers", async () => {
+  const matches = [
+    ["Amazon category", "https://www.amazon.com/kindle/b/?node=16571048011"],
+    ["Kindle Paperwhite", "https://www.amazon.com/dp/B0CFPJYX7P"],
+    ["Alternate Amazon offer", "https://amazon.com/gp/product/B0CFPJYX7P"],
+    ["Kindle Paperwhite", "https://www.bestbuy.com/site/kindle-paperwhite/123.p"],
+  ];
+  const lines = matches.map(([title]) => title + " | Ordering page.");
+  let start = 0;
+  const annotations = matches.map(([, url], index) => {
+    const end = start + lines[index].length;
+    const citation = { type: "url_citation", url, title: new URL(url).hostname, start_index: start, end_index: end };
+    start = end + 1;
+    return citation;
+  });
+  const providers = createProviders({ apiKey: "test-key", fetcher: async (_url, options) => {
+    const request = JSON.parse(options.body);
+    assert.match(request.system_instruction, /direct U.S. ordering pages for the exact product/);
+    assert.match(request.input, /Kindle Paperwhite/);
+    return Response.json({ steps: [
+      { type: "google_search_result", result: [] },
+      { type: "model_output", content: [{ type: "text", text: lines.join("\n"), annotations }] },
+    ] });
+  } });
+  const result = await providers.retail({ query: "Kindle Paperwhite" }, new AbortController().signal);
+  assert.deepEqual(result.items, [
+    { title: "Kindle Paperwhite", merchant: "amazon.com", url: matches[1][1] },
+    { title: "Kindle Paperwhite", merchant: "bestbuy.com", url: matches[3][1] },
+  ]);
+});
+
+test("product links exclude Amazon searches and image matching preserves variants", () => {
+  assert.equal(amazonItemUrl("https://m.amazon.com/Kindle/dp/B0CFPJYX7P?tag=affiliate"), "https://www.amazon.com/dp/B0CFPJYX7P");
+  assert.equal(amazonItemUrl("https://www.amazon.com/gp/product/B0CFPJYX7P"), "https://www.amazon.com/dp/B0CFPJYX7P");
+  assert.equal(amazonItemUrl("https://www.amazon.com/s?k=kindle"), null);
+  assert.equal(amazonItemUrl("https://amazon.com.example.org/dp/B0CFPJYX7P"), null);
+  assert.equal(productPhotoKey("Sony WH-1000XM5 Headphones, Black"), productPhotoKey("Sony WH-1000XM5 Black Headphones"));
+  assert.notEqual(productPhotoKey("Sony WH-1000XM5 Headphones, Black"), productPhotoKey("Sony WH-1000XM5 Headphones, Silver"));
 });
 
 test("key import reads GEMINI_API_KEY from the chosen env file", () => {
