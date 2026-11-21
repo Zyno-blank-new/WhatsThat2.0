@@ -6,66 +6,62 @@ function clean(value, limit) {
   return typeof value === "string" ? value.trim().slice(0, limit) : "";
 }
 
-function modelEvidence(result, moment) {
+function modelEvidence(result) {
   const candidate = result.product;
-  const product = clean(candidate?.query, 240) ? {
-    label: clean(candidate.label, 80),
-    query: clean(candidate.query, 240),
+  const query = clean(candidate?.query, 240);
+  const title = clean(candidate?.title, 60);
+  const label = clean(candidate?.label, 80);
+  const product = query && title && label ? {
+    id: "catalog",
+    title,
+    label,
+    query,
     evidence: clean(candidate.evidence, 300),
     maxUsd: Number.isFinite(candidate.maxUsd) ? candidate.maxUsd : null,
   } : null;
-  return {
-    summary: clean(result.summary, 400),
-    product,
-    pageProduct: moment.page?.product ?? null,
-    webQueries: result.webQueries.slice(0, 3).flatMap((entry) => {
-      const query = clean(entry?.query, 220);
-      return query ? [{ label: clean(entry.label, 80) || query, query }] : [];
-    }),
-  };
+  const webQueries = result.webQueries.slice(0, 3).flatMap((entry, index) => {
+    const query = clean(entry?.query, 220);
+    const title = clean(entry?.title, 60);
+    const label = clean(entry?.label, 80);
+    return query && title && label ? [{ id: "web-" + index, title, label, query }] : [];
+  });
+  return { summary: clean(result.summary, 400), product, webQueries };
 }
 
 async function runLookups(providers, evidence, signal, send) {
+  if (!evidence.product && !evidence.webQueries.length) return;
   const routing = await providers.decide(evidence, signal).catch((error) => {
-    if (!signal.aborted) send("warning", { area: "lookup", message: error.message });
+    if (!signal.aborted) send("warning", { message: error.message });
     return null;
   });
   if (!routing || signal.aborted) return;
-  const shop = Boolean(evidence.product && routing.shop >= minimumYes);
-  const web = Boolean(evidence.webQueries.length && routing.web >= minimumYes);
-  send("lookup", { shop, web });
+  const product = routing.shop >= minimumYes ? evidence.product : null;
+  const queries = routing.web >= minimumYes ? evidence.webQueries : [];
+  const links = [...(product ? [product] : []), ...queries].map(({ id, title, label }) => ({ id, title, label }));
+  if (links.length) send("lookup", { links });
 
-  const search = async (area, operation) => {
+  const search = async (type, entry, operation) => {
     try {
-      send(area, await operation());
+      const result = await operation();
+      if (!signal.aborted) send(type, { id: entry.id, ...result });
     } catch (error) {
-      if (!signal.aborted) send("warning", { area, message: error.message });
+      if (!signal.aborted) send("warning", { id: entry.id, message: error.message });
     }
   };
   await Promise.all([
-    shop && search("shop", () => providers.shop(evidence.product, signal)),
-    web && search("web", () => providers.search(evidence.webQueries, evidence.summary, signal)),
+    product && search("shop", product, () => providers.shop(product, signal)),
+    ...queries.map((query) => search("web", query, () => providers.search([query], evidence.summary, signal))),
   ]);
 }
 
 export async function inspectMoment(providers, moment, signal, send) {
-  const start = performance.now();
-  const pageProduct = moment.page?.product;
-  const knownLookups = pageProduct?.name ? runLookups(providers, {
-    summary: "The current page is about this named product.",
-    product: { label: pageProduct.name, query: pageProduct.name, evidence: "Explicit product name on the current page.", maxUsd: null },
-    pageProduct,
-    webQueries: [{ label: "Prices and reviews", query: `Compare current US prices and find independent reviews for ${pageProduct.name}` }],
-  }, signal, send) : null;
   try {
     const result = await providers.analyze(moment, signal);
-    const sections = normalizeSections(result.sections, 4);
-    send("context", { sections, elapsedMs: Math.round(performance.now() - start) });
-    if (!knownLookups) await runLookups(providers, modelEvidence(result, moment), signal, send);
+    send("context", { sections: normalizeSections(result.sections, 4) });
+    await runLookups(providers, modelEvidence(result), signal, send);
   } catch (error) {
-    send("error", { error: error.message });
+    if (!signal.aborted) send("error", { error: error.message });
   } finally {
-    await knownLookups;
-    send("done");
+    if (!signal.aborted) send("done");
   }
 }

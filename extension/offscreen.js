@@ -14,13 +14,44 @@ async function stop(session = active) {
   await session.audio?.close().catch(() => {});
 }
 
+function record(session) {
+  const prior = session.recorder;
+  if (prior?.state === "recording") {
+    prior.ondataavailable = null;
+    prior.stop();
+  }
+  const buffer = new WebmLookback();
+  session.buffer = buffer;
+  session.reading = Promise.resolve();
+  session.error = "";
+  const recorder = new MediaRecorder(session.stream, {
+    mimeType: "video/webm;codecs=vp8,opus",
+    videoBitsPerSecond: 720_000,
+    audioBitsPerSecond: 48_000,
+    videoKeyFrameIntervalDuration: 400,
+  });
+  session.recorder = recorder;
+  recorder.ondataavailable = ({ data }) => {
+    if (!data.size) return;
+    session.reading = session.reading
+      .then(async () => buffer.append(new Uint8Array(await data.arrayBuffer())))
+      .catch((error) => {
+        if (session.recorder === recorder) session.error = error.message;
+      });
+  };
+  recorder.addEventListener("error", () => {
+    if (session.recorder === recorder) session.ended();
+  }, { once: true });
+  recorder.start(200);
+}
+
 async function start({ streamId, tabId }) {
   await stop();
   const stream = await navigator.mediaDevices.getUserMedia({
     audio: options(streamId),
     video: options(streamId, { maxWidth: 1280, maxHeight: 720, maxFrameRate: 15 }),
   });
-  const session = { stream, tabId, buffer: new WebmLookback(), reading: Promise.resolve() };
+  const session = { stream, tabId };
   active = session;
   try {
     if (stream.getAudioTracks().length) {
@@ -28,30 +59,13 @@ async function start({ streamId, tabId }) {
       session.audio.createMediaStreamSource(stream).connect(session.audio.destination);
       await session.audio.resume();
     }
-    const mimeType = "video/webm;codecs=vp8,opus";
-    const recorder = new MediaRecorder(stream, {
-      mimeType,
-      videoBitsPerSecond: 720_000,
-      audioBitsPerSecond: 48_000,
-      videoKeyFrameIntervalDuration: 400,
-    });
-    session.recorder = recorder;
-    recorder.ondataavailable = ({ data }) => {
-      if (!data.size) return;
-      session.reading = session.reading
-        .then(async () => session.buffer.append(new Uint8Array(await data.arrayBuffer())))
-        .catch((error) => {
-          session.error = error.message;
-        });
-    };
-    const ended = () => {
+    session.ended = () => {
       if (active !== session) return;
       void stop(session);
       void chrome.runtime.sendMessage({ type: "lookback-ended", tabId }).catch(() => {});
     };
-    stream.getVideoTracks()[0]?.addEventListener("ended", ended, { once: true });
-    recorder.addEventListener("error", ended, { once: true });
-    recorder.start(200);
+    stream.getVideoTracks()[0]?.addEventListener("ended", session.ended, { once: true });
+    record(session);
   } catch (error) {
     await stop(session);
     throw error;
@@ -88,7 +102,7 @@ async function snapshot(tabId) {
     }
   });
   await session.reading;
-  if (active !== session) return null;
+  if (active !== session || session.recorder !== recorder) return null;
   if (session.error) throw new Error(session.error);
   const clip = session.buffer.clip();
   return clip ? { video: await dataUrl(clip.bytes), durationMs: clip.durationMs } : null;
@@ -96,7 +110,14 @@ async function snapshot(tabId) {
 
 chrome.runtime.onMessage.addListener((message, _sender, reply) => {
   if (message.target !== "recorder") return;
-  const operations = { start: () => start(message), stop: () => stop(), snapshot: () => snapshot(message.tabId) };
+  const operations = {
+    start: () => start(message),
+    stop: () => stop(),
+    snapshot: () => snapshot(message.tabId),
+    reset: () => {
+      if (active?.tabId === message.tabId) record(active);
+    },
+  };
   const run = operations[message.operation];
   if (!run) return;
   Promise.resolve().then(run).then(

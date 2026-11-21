@@ -13,8 +13,8 @@
       <span class="logo" aria-hidden="true"><i></i><i></i></span>
       <span>What’sThat<span class="mark">?</span></span>
     </div>
-    <button id="lookback" class="lookback" type="button" aria-pressed="false" title="Toggle the rolling recording for this tab">
-      <span class="indicator" aria-hidden="true"></span><span id="lookback-label">Enable lookback</span>
+    <button id="lookback" class="lookback" type="button" aria-pressed="false" title="Pause or start lookback for this tab">
+      <span class="indicator" aria-hidden="true"></span><span id="lookback-label">Start lookback</span>
     </button>
   </header>
   <main>
@@ -28,10 +28,6 @@
       <div class="key-pair" aria-label="Option Q"><kbd id="modifier">⌥</kbd><kbd>Q</kbd></div>
     </section>
     <section id="capture" class="capture" hidden>
-      <div class="capture-image">
-        <img id="screenshot" alt="Screenshot of the tab at the shortcut">
-        <div id="capture-placeholder" class="capture-placeholder" hidden></div>
-      </div>
       <div class="capture-info">
         <div class="capture-source">
           <h1 id="page-title"></h1>
@@ -43,8 +39,17 @@
     </section>
     <div id="status" class="status" role="status" hidden></div>
     <div id="recording-note" class="notice" hidden></div>
+    <div id="suggestion-skeleton" class="suggestion-skeleton" aria-hidden="true" hidden>
+      <div class="skeleton-group">
+        <span class="skeleton skeleton-heading"></span>
+        <div class="chips"><span class="skeleton skeleton-chip"></span><span class="skeleton skeleton-chip"></span></div>
+      </div>
+      <div class="skeleton-group">
+        <span class="skeleton skeleton-heading"></span>
+        <div class="chips"><span class="skeleton skeleton-chip"></span><span class="skeleton skeleton-chip"></span></div>
+      </div>
+    </div>
     <div id="sections"></div>
-    <div id="enrichment"></div>
     <section id="conversation" aria-label="Follow-up answers"></section>
   </main>
   <footer>
@@ -59,7 +64,7 @@
       <button id="key-settings" class="privacy" type="button">Settings</button>
       <button id="capture-help" class="privacy" type="button" aria-expanded="false">About lookback</button>
     </div>
-    <p id="privacy-details" class="privacy-details" hidden>Lookback buffers video and audio from this tab in memory. Analyze or ask to send the captured moment to Gemini. Relevant search terms may be sent to Google Search or Shop.</p>
+    <p id="privacy-details" class="privacy-details" hidden>Lookback starts when you first use the extension on a tab. It keeps up to 10 seconds of tab video and audio in memory. Analyzing or asking a question sends the clip to Gemini. Relevant terms may go to Google Search or Shopify.</p>
   </footer>
   <dialog id="settings" aria-labelledby="settings-title">
     <form id="key-form">

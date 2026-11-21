@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { inspectMoment } from "../extension/analysis.js";
 import { createProviders } from "../extension/providers.js";
 import { parseGeminiKeyFile } from "../extension/key-settings.js";
 import { distinctTopics, normalizeSections } from "../extension/suggestions.js";
@@ -11,17 +12,19 @@ const moment = {
   url: "https://example.com/review",
 };
 
-test("Hydrogen gets the playable video and primary screenshot in the same request", async () => {
+test("Hydrogen gets only the playable video as context and prioritizes its ending", async () => {
   const providers = createProviders({ apiKey: "test-key", fetcher: async (url, options) => {
     const request = JSON.parse(options.body);
     assert.match(url, /\/interactions$/);
+    assert.equal(options.priority, "low");
     assert.equal(request.model, "gemini-4-hydrogen");
     assert.equal(request.store, false);
     assert.equal(request.generation_config.thinking_level, "low");
-    assert.deepEqual(request.input.slice(0, 2).map((item) => [item.type, item.mime_type]), [
-      ["video", "video/webm"], ["image", "image/jpeg"],
+    assert.deepEqual(request.input, [
+      { type: "video", mime_type: "video/webm", data: "Yg==", processing: { type: "static", fps: 2 } },
+      { type: "text", text: "Generate the sidebar for this moment." },
     ]);
-    assert.match(request.system_instruction, /screenshot as the main reference/);
+    assert.match(request.system_instruction, /final two seconds as the strongest signal/);
     const chip = request.response_format.schema.properties.sections.items.properties.chips.items;
     assert.deepEqual(Object.keys(chip.properties), ["label", "question"]);
     return Response.json({ steps: [{
@@ -34,24 +37,80 @@ test("Hydrogen gets the playable video and primary screenshot in the same reques
   });
 });
 
-test("the quick request supplies a focused question behind each label", async () => {
+test("the quick request uses video and preserves the model's choice of sections", async () => {
   const chip = { label: "Hydrostatic head", question: "What does hydrostatic head say about this fabric?" };
+  const sections = [{ title: "Fabric specs", chips: [chip] }];
   const providers = createProviders({ apiKey: "test-key", fetcher: async (_url, options) => {
     const request = JSON.parse(options.body);
+    assert.equal(options.priority, "high");
     assert.equal(request.model, "gemini-3.5-flash-lite");
     assert.equal(request.generation_config.thinking_level, "minimal");
-    assert.deepEqual(request.input.slice(0, 2).map((item) => item.type), ["video", "image"]);
+    assert.deepEqual(request.input.map((item) => item.type), ["video", "text"]);
+    assert.deepEqual(request.input[0].processing, { type: "static", fps: 1 });
+    assert.match(request.system_instruction, /final two seconds as the strongest signal/);
     const properties = request.response_format.schema.properties;
-    assert.deepEqual(Object.keys(properties), ["heading", "chips"]);
-    assert.equal(properties.chips.maxItems, 2);
-    assert.deepEqual(Object.keys(properties.chips.items.properties), ["label", "question"]);
+    assert.deepEqual(Object.keys(properties), ["sections"]);
+    assert.equal(properties.sections.maxItems, 2);
+    assert.deepEqual(Object.keys(properties.sections.items.properties.chips.items.properties), ["label", "question"]);
     return Response.json({ steps: [{ type: "model_output", content: [{
-      type: "text", text: JSON.stringify({ heading: "Fabric specs", chips: [chip] }),
+      type: "text", text: JSON.stringify({ sections }),
     }] }] });
   } });
-  assert.deepEqual(await providers.quickChips(moment, new AbortController().signal), [{
-    title: "Fabric specs", chips: [chip],
-  }]);
+  assert.deepEqual(await providers.quickChips(moment, new AbortController().signal), sections);
+});
+
+test("chip answers send the question and the same video context", async () => {
+  const providers = createProviders({ apiKey: "test-key", fetcher: async (_url, options) => {
+    const request = JSON.parse(options.body);
+    assert.deepEqual(request.input.map((item) => item.type), ["video", "text"]);
+    assert.equal(request.input[0].data, "Yg==");
+    assert.match(request.input[1].text, /What does this rating mean\?/);
+    assert.doesNotMatch(request.input[1].text, /Gear review|example\.com/);
+    return Response.json({ output_text: "It describes the fabric’s water resistance." });
+  } });
+  const answer = await providers.followUp(moment, "What does this rating mean?", [], new AbortController().signal);
+  assert.equal(answer, "It describes the fabric’s water resistance.");
+});
+
+test("lookup sections and chip labels come from the model and gated searches route separately", async () => {
+  const sections = [{ title: "Fabric specs", chips: [{ label: "Water column", question: "How is this rating measured?" }] }];
+  const product = { title: "Shop similar shells", label: "Packable rain jackets", query: "packable rain jacket" };
+  const webQueries = [
+    { title: "What reviewers say", label: "Trail performance", query: "named shell independent reviews" },
+    { title: "Compare prices", label: "Other stores", query: "named shell exact variant prices" },
+  ];
+  const calls = [];
+  const events = [];
+  const providers = {
+    analyze: async () => ({ summary: "Rain shell review", sections, product, webQueries }),
+    decide: async () => ({ shop: 0.9, web: 0.9 }),
+    shop: async (candidate) => {
+      calls.push(candidate.query);
+      return { items: [], warnings: [] };
+    },
+    search: async ([candidate]) => {
+      calls.push(candidate.query);
+      return { blocks: [], suggestions: [] };
+    },
+  };
+  const send = (type, payload) => events.push({ type, ...payload });
+  const signal = new AbortController().signal;
+  await inspectMoment(providers, moment, signal, send);
+  assert.deepEqual(events[0], { type: "context", sections });
+  assert.deepEqual(events[1], {
+    type: "lookup",
+    links: [
+      { id: "catalog", title: product.title, label: product.label },
+      ...webQueries.map(({ title, label }, index) => ({ id: "web-" + index, title, label })),
+    ],
+  });
+  assert.deepEqual(calls, [product.query, ...webQueries.map(({ query }) => query)]);
+  assert.deepEqual(events.filter(({ id }) => id).map(({ id }) => id), ["catalog", "web-0", "web-1"]);
+
+  calls.length = 0;
+  const blocked = { ...providers, decide: async () => ({ shop: 0.2, web: 0.1 }) };
+  await inspectMoment(blocked, moment, signal, send);
+  assert.deepEqual(calls, []);
 });
 
 test("vague labels and repeated questions are filtered across sections", () => {

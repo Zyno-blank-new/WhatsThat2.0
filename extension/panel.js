@@ -5,10 +5,10 @@ import { chipKey, distinctTopics } from "./suggestions.js";
 
 const $ = (id) => document.getElementById(id);
 const ui = {
-  empty: $("empty"), capture: $("capture"), image: $("screenshot"), title: $("page-title"),
-  source: $("source"), placeholder: $("capture-placeholder"), clip: $("clip"),
+  empty: $("empty"), capture: $("capture"), title: $("page-title"),
+  source: $("source"), clip: $("clip"), skeleton: $("suggestion-skeleton"),
   preview: $("preview-button"), status: $("status"), notice: $("recording-note"),
-  sections: $("sections"), enrichment: $("enrichment"), conversation: $("conversation"),
+  sections: $("sections"), conversation: $("conversation"),
   lookback: $("lookback"), lookbackLabel: $("lookback-label"), form: $("ask-form"),
   question: $("question"), ask: $("ask-button"),
 };
@@ -21,6 +21,7 @@ let recent = [];
 let renderedChip = false;
 const chipGroups = new Map();
 const chipEntries = new Map();
+const lookupEntries = new Map();
 let port;
 const windowId = (await chrome.windows.getCurrent()).id;
 
@@ -53,7 +54,9 @@ function link(url, className, text) {
 function setStatus(message, style = "") {
   ui.status.hidden = !message;
   ui.status.textContent = message || "";
-  ui.status.className = ["status", style].filter(Boolean).join(" ");
+  ui.status.className = "status";
+  if (style) ui.status.classList.add(style === "busy" ? "visually-hidden" : style);
+  ui.skeleton.hidden = style !== "busy" || renderedChip;
 }
 
 function setNotice(message, error = false) {
@@ -70,13 +73,12 @@ function stopTask() {
   renderedChip = false;
   chipGroups.clear();
   chipEntries.clear();
+  lookupEntries.clear();
   ui.sections.replaceChildren();
-  ui.enrichment.replaceChildren();
   ui.conversation.replaceChildren();
   ui.question.value = "";
   ui.question.disabled = true;
   ui.ask.disabled = true;
-  ui.image.removeAttribute("src");
   ui.clip.pause();
   ui.clip.removeAttribute("src");
   ui.clip.load();
@@ -92,24 +94,43 @@ function preview(job) {
   ui.empty.hidden = true;
   ui.capture.hidden = false;
   ui.title.textContent = job.title;
-  ui.source.textContent = new URL(job.url).hostname.replace(/^www\./, "");
-  ui.image.hidden = !job.screenshot;
-  ui.placeholder.hidden = Boolean(job.screenshot);
-  if (job.screenshot && ui.image.getAttribute("src") !== job.screenshot) ui.image.src = job.screenshot;
+  ui.source.textContent = job.host;
 }
 
-function section(title, parent) {
-  const block = make("section", "section");
-  block.append(make("h2", "", title));
-  parent.append(block);
-  return block;
+function getGroup(title) {
+  const key = title.toLowerCase();
+  let group = chipGroups.get(key);
+  if (!group) {
+    group = {
+      block: make("section", "section"), chips: make("div", "chips"),
+      answer: make("div", "answer"), lookups: make("div", "lookup-list"), selected: null,
+    };
+    group.answer.hidden = true;
+    group.answer.setAttribute("role", "status");
+    group.block.append(make("h2", "", title), group.chips, group.answer, group.lookups);
+    ui.sections.append(group.block);
+    chipGroups.set(key, group);
+  }
+  return group;
+}
+
+function showPending(container, label) {
+  const lines = make("span", "skeleton-lines");
+  lines.setAttribute("aria-hidden", "true");
+  lines.append(make("span", "skeleton"), make("span", "skeleton"), make("span", "skeleton"));
+  container.setAttribute("aria-busy", "true");
+  container.replaceChildren(make("span", "visually-hidden", label), lines);
 }
 
 function paintChipAnswer(group) {
   const selected = group.selected;
   group.answer.hidden = !selected;
-  group.answer.textContent = selected?.answer || selected?.error || "Looking up this answer…";
-  group.answer.setAttribute("aria-busy", String(Boolean(selected?.pending)));
+  if (selected?.pending) {
+    showPending(group.answer, "Looking up this answer…");
+  } else {
+    group.answer.textContent = selected?.answer || selected?.error || "";
+    group.answer.removeAttribute("aria-busy");
+  }
 }
 
 async function answerChip(group, item) {
@@ -139,16 +160,7 @@ function showSections(sections) {
       const key = chipKey(label);
       const questionKey = chipKey(question);
       if (!key || chipEntries.has(key) || [...chipEntries.values()].some((entry) => entry.questionKey === questionKey)) continue;
-      const heading = title.toLowerCase();
-      let group = chipGroups.get(heading);
-      if (!group) {
-        const block = section(title, ui.sections);
-        group = { block, chips: make("div", "chips"), answer: make("div", "answer"), selected: null };
-        group.answer.hidden = true;
-        group.answer.setAttribute("role", "status");
-        block.append(group.chips, group.answer);
-        chipGroups.set(heading, group);
-      }
+      const group = getGroup(title);
       const item = { label, question };
       const trigger = make("button", "chip", label);
       trigger.type = "button";
@@ -169,6 +181,7 @@ function showSections(sections) {
   }
   if (chipEntries.size && !renderedChip && moment) {
     renderedChip = true;
+    ui.skeleton.hidden = true;
     const elapsedMs = Date.now() - moment.capturedAt;
     console.info("What’sThat? first clickable chip", elapsedMs + " ms");
   }
@@ -182,7 +195,7 @@ function replaceSuggestions(sections) {
     chipEntries.delete(key);
   }
   for (const [key, group] of chipGroups) {
-    if (group.chips.children.length) continue;
+    if (group.chips.children.length || group.lookups.children.length) continue;
     group.block.remove();
     chipGroups.delete(key);
   }
@@ -201,16 +214,29 @@ async function refineSuggestions(providers, value, signal) {
   receiveAnalysis({ type: "context", ...value, sections });
 }
 
-function lookupDetails(label) {
-  const block = make("details", "section lookup");
-  const trigger = make("summary", "chip", label);
-  block.append(trigger);
-  ui.enrichment.append(block);
-  return block;
+function mountLookups(links) {
+  for (const { id, title, label } of links) {
+    const group = getGroup(title);
+    const details = make("details", "lookup");
+    const body = make("div", "lookup-body");
+    body.setAttribute("role", "status");
+    showPending(body, "Looking up results…");
+    details.append(make("summary", "chip", label), body);
+    group.lookups.append(details);
+    lookupEntries.set(id, body);
+  }
 }
 
-function showShop({ items, warnings }) {
-  const block = lookupDetails("Similar products");
+function finishLookup(id) {
+  const body = lookupEntries.get(id);
+  body?.replaceChildren();
+  body?.removeAttribute("aria-busy");
+  return body;
+}
+
+function showShop({ id, items, warnings }) {
+  const block = finishLookup(id);
+  if (!block) return;
   const grid = make("div", "product-grid");
   block.append(grid);
   for (const item of items) {
@@ -235,13 +261,13 @@ function showShop({ items, warnings }) {
   for (const message of warnings) block.append(make("p", "notice", message));
 }
 
-function showWeb({ blocks, suggestions, searched }) {
-  if (!blocks.length) return;
-  if (!searched) {
-    ui.enrichment.append(make("p", "notice", "Google Search returned no grounded sources for this lookup."));
+function showWeb({ id, blocks, suggestions, searched }) {
+  const block = finishLookup(id);
+  if (!block) return;
+  if (!blocks.length || !searched) {
+    block.append(make("p", "results-empty", "Google Search returned no grounded sources for this lookup."));
     return;
   }
-  const block = lookupDetails("From the web");
   const card = make("div", "web-card");
   block.append(card);
   let sourceIndex = 0;
@@ -281,14 +307,17 @@ function receiveAnalysis(event) {
     if (!event.sections.length && !ui.sections.children.length) setStatus("There was too little context for specific suggestions.");
     else setStatus();
   }
-  if (event.type === "lookup" && (event.shop || event.web)) {
-    setStatus("Looking up sources and listings…", "busy");
+  if (event.type === "lookup") {
+    mountLookups(event.links);
+    setStatus();
   }
   if (event.type === "shop") showShop(event);
   if (event.type === "web") showWeb(event);
-  if (event.type === "warning") ui.enrichment.append(make("p", "notice error", event.message));
+  if (event.type === "warning") {
+    if (event.id) finishLookup(event.id)?.append(make("p", "notice error", event.message));
+    else setNotice(event.message, true);
+  }
   if (event.type === "error") setStatus(event.error, "error");
-  if (event.type === "done" && ui.status.classList.contains("busy")) setStatus();
 }
 
 async function consumeAnalysis(snapshot, signal) {
@@ -310,11 +339,12 @@ async function consumeAnalysis(snapshot, signal) {
     });
     await inspectMoment(providers, snapshot, signal, (type, value) => {
       if (signal.aborted) return;
-      if (type === "context" && value.sections.length) {
+      if (type === "context" && value.sections.length && chipEntries.size) {
         fullAnalysisReady = true;
         void refineSuggestions(providers, value, signal);
         return;
       }
+      if (type === "context" && value.sections.length) fullAnalysisReady = true;
       receiveAnalysis({ type, ...value });
     });
   } catch (error) {
@@ -326,50 +356,24 @@ function begin(job) {
   if (moment?.id === job.id) return;
   stopTask();
   preview(job);
-  moment = {
-    id: job.id, capturedAt: job.capturedAt, screenshot: job.screenshot,
-    title: job.title, url: job.url, page: job.page, clip: job.clip,
-  };
+  moment = { id: job.id, capturedAt: job.capturedAt, clip: job.clip };
   ui.question.disabled = false;
-  if (job.clip) {
-    ui.clip.src = job.clip.video;
-    ui.preview.hidden = false;
-    ui.preview.title = `Previous ${(job.clip.durationMs / 1000).toFixed(1)} seconds`;
-  } else {
-    setNotice(job.warning || "Enable lookback for a recent clip, then press the shortcut again.", Boolean(job.warning));
+  ui.clip.src = job.clip.video;
+  ui.preview.hidden = false;
+  ui.preview.title = `Previous ${(job.clip.durationMs / 1000).toFixed(1)} seconds`;
+  if (job.clip.durationMs < 3500) {
+    setNotice("Lookback just started. This first clip is shorter.");
   }
   controller = new AbortController();
-  const productName = job.page?.product?.name;
-  const visibleChips = (job.page?.terms ?? []).map((label) => ({
-    label, question: `What does "${label}" mean in the context of this page?`,
-  }));
-  const method = job.page?.mainHeading?.match(/^[\w$]+(?:\.[\w$]+)+\(\)$/)?.[0];
-  if (method && method.length < 68) {
-    visibleChips.unshift({
-      label: `${method} return value`,
-      question: `What does ${method} return, including the cases described on this page?`,
-    });
-  }
-  if (productName) {
-    visibleChips.unshift({
-      label: productName.slice(0, 85),
-      question: `What are the main features and trade-offs of "${productName}" as described on this page?`,
-    });
-  }
-  if (visibleChips.length) {
-    showSections([{ title: "On this page", chips: visibleChips }]);
-  } else {
-    setStatus("Finding suggestions…", "busy");
-  }
+  setStatus("Finding suggestions…", "busy");
   void consumeAnalysis(moment, controller.signal);
 }
 
 function recordingState(enabled, error) {
   ui.lookback.setAttribute("aria-pressed", String(enabled));
-  ui.lookbackLabel.textContent = enabled ? "Lookback on" : "Enable lookback";
+  ui.lookbackLabel.textContent = enabled ? "Lookback on" : "Start lookback";
   if (error) setNotice(error, true);
-  else if (enabled && !moment?.clip) setNotice("Lookback is on. Press the shortcut after the moment you want to capture.");
-  else if (!enabled && !moment) setNotice();
+  else if (!moment) setNotice();
 }
 
 function connect() {
@@ -380,7 +384,6 @@ function connect() {
       preview(event.job);
       setStatus("Capturing this moment…", "busy");
     }
-    if (event.type === "preview" && !moment) preview(event.job);
     if (event.type === "captured") begin(event.job);
     if (event.type === "recording") recordingState(event.enabled, event.error);
     if (event.type === "error") setStatus(event.error, "error");
@@ -441,14 +444,15 @@ ui.form.addEventListener("submit", async (event) => {
   ui.question.disabled = true;
   ui.ask.disabled = true;
   const turn = make("article", "turn");
-  const answer = make("p", "answer-pending", "Thinking…");
+  const answer = make("p");
+  answer.setAttribute("role", "status");
+  showPending(answer, "Thinking…");
   turn.append(make("p", "question", question), answer);
   ui.conversation.append(turn);
   turn.scrollIntoView({ block: "nearest", behavior: "instant" });
   try {
     const result = await createProviders({ apiKey }).followUp(snapshot, question, recent, signal);
     if (signal.aborted) return;
-    answer.className = "";
     answer.textContent = result;
     recent.push({ question, answer: result });
     recent = recent.slice(-6);
@@ -456,6 +460,7 @@ ui.form.addEventListener("submit", async (event) => {
     if (!signal.aborted) answer.textContent = error.message;
   } finally {
     if (!signal.aborted) {
+      answer.removeAttribute("aria-busy");
       ui.question.disabled = false;
       ui.question.focus();
     }
