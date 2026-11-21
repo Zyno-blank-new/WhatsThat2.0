@@ -1,0 +1,22 @@
+{
+  "manifest_version": 3,
+  "name": "What’sThat?",
+  "version": "2.0.0",
+  "description": "Get answers about what you just saw or heard in Chrome.",
+  "minimum_chrome_version": "116",
+  "permissions": ["activeTab", "scripting", "sidePanel", "tabCapture", "offscreen", "storage"],
+  "host_permissions": ["https://generativelanguage.googleapis.com/*", "https://catalog.shopify.com/*"],
+  "background": { "service_worker": "background.js", "type": "module" },
+  "action": { "default_title": "Ask about this moment" },
+  "side_panel": { "default_path": "panel.html" },
+  "commands": {
+    "analyze": {
+      "suggested_key": { "default": "Alt+Q", "mac": "Option+Q" },
+      "description": "Analyze this moment"
+    },
+    "toggle-lookback": {
+      "suggested_key": { "default": "Alt+Shift+Q", "mac": "Option+Shift+Q" },
+      "description": "Turn tab lookback on or off"
+    }
+  }
+}

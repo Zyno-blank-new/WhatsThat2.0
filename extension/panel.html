@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>What’sThat?</title>
+  <link rel="stylesheet" href="panel.css">
+  <script type="module" src="panel.js"></script>
+</head>
+<body>
+  <header class="toolbar">
+    <div class="wordmark">
+      <span class="logo" aria-hidden="true"><i></i><i></i></span>
+      <span>What’sThat<span class="mark">?</span></span>
+    </div>
+    <button id="lookback" class="lookback" type="button" aria-pressed="false" title="Toggle the rolling recording for this tab">
+      <span class="indicator" aria-hidden="true"></span><span id="lookback-label">Enable lookback</span>
+    </button>
+  </header>
+  <main>
+    <section id="empty" class="empty">
+      <div class="empty-visual" aria-hidden="true">
+        <span class="focus-corners"></span>
+        <span class="focus-dot"></span>
+      </div>
+      <h1>Curious about<br>what you just saw?</h1>
+      <p>Open from a webpage or video to get answers about what’s on screen.</p>
+      <div class="key-pair" aria-label="Option Q"><kbd id="modifier">⌥</kbd><kbd>Q</kbd></div>
+    </section>
+    <section id="capture" class="capture" hidden>
+      <div class="capture-image">
+        <img id="screenshot" alt="Screenshot of the tab at the shortcut">
+        <div id="capture-placeholder" class="capture-placeholder" hidden></div>
+      </div>
+      <div class="capture-info">
+        <div class="capture-source">
+          <h1 id="page-title"></h1>
+          <span id="source"></span>
+        </div>
+        <button id="preview-button" class="text-button" type="button" aria-expanded="false" hidden>View clip</button>
+      </div>
+      <video id="clip" controls playsinline preload="none" hidden></video>
+    </section>
+    <div id="status" class="status" role="status" hidden></div>
+    <div id="recording-note" class="notice" hidden></div>
+    <div id="sections"></div>
+    <div id="enrichment"></div>
+    <section id="conversation" aria-label="Follow-up answers"></section>
+  </main>
+  <footer>
+    <form id="ask-form" class="composer">
+      <label class="visually-hidden" for="question">Ask about this moment</label>
+      <input id="question" type="text" maxlength="400" autocomplete="off" placeholder="Ask about this moment" disabled>
+      <button id="ask-button" type="submit" aria-label="Send question" disabled>
+        <svg aria-hidden="true" viewBox="0 0 20 20" fill="none"><path d="M10 15V5m-4 4 4-4 4 4" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </button>
+    </form>
+    <div class="footer-tools">
+      <button id="key-settings" class="privacy" type="button">Settings</button>
+      <button id="capture-help" class="privacy" type="button" aria-expanded="false">About lookback</button>
+    </div>
+    <p id="privacy-details" class="privacy-details" hidden>Lookback buffers video and audio from this tab in memory. Analyze or ask to send the captured moment to Gemini. Relevant search terms may be sent to Google Search or Shop.</p>
+  </footer>
+  <dialog id="settings" aria-labelledby="settings-title">
+    <form id="key-form">
+      <h2 id="settings-title">Gemini API key</h2>
+      <p>Use your hackathon key. Chrome stores it in this profile.</p>
+      <label class="visually-hidden" for="gemini-key">Gemini API key</label>
+      <input id="gemini-key" type="password" maxlength="256" autocomplete="off" placeholder="Enter your key">
+      <button id="import-key" class="privacy import-key" type="button">Import .env.local</button>
+      <input id="key-file" type="file" aria-label="Choose a Gemini environment file" hidden>
+      <p id="key-status" class="key-status" role="status" hidden></p>
+      <div class="settings-actions">
+        <button id="remove-key" class="text-button" type="button" hidden>Remove key</button>
+        <button id="cancel-key" class="text-button" type="button">Cancel</button>
+        <button id="save-key" class="text-button primary" type="submit">Save key</button>
+      </div>
+    </form>
+  </dialog>
+</body>
+</html>

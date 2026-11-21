@@ -1,0 +1,162 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import { createProviders } from "../extension/providers.js";
+import { parseGeminiKeyFile } from "../extension/key-settings.js";
+import { distinctTopics, normalizeSections } from "../extension/suggestions.js";
+
+const moment = {
+  screenshot: "data:image/jpeg;base64,YQ==",
+  clip: { video: "data:video/webm;base64,Yg==", durationMs: 9880 },
+  title: "Gear review",
+  url: "https://example.com/review",
+};
+
+test("Hydrogen gets the playable video and primary screenshot in the same request", async () => {
+  const providers = createProviders({ apiKey: "test-key", fetcher: async (url, options) => {
+    const request = JSON.parse(options.body);
+    assert.match(url, /\/interactions$/);
+    assert.equal(request.model, "gemini-4-hydrogen");
+    assert.equal(request.store, false);
+    assert.equal(request.generation_config.thinking_level, "low");
+    assert.deepEqual(request.input.slice(0, 2).map((item) => [item.type, item.mime_type]), [
+      ["video", "video/webm"], ["image", "image/jpeg"],
+    ]);
+    assert.match(request.system_instruction, /screenshot as the main reference/);
+    const chip = request.response_format.schema.properties.sections.items.properties.chips.items;
+    assert.deepEqual(Object.keys(chip.properties), ["label", "question"]);
+    return Response.json({ steps: [{
+      type: "model_output",
+      content: [{ type: "text", text: JSON.stringify({ sections: [], webQueries: [], product: null }) }],
+    }] });
+  } });
+  assert.deepEqual(await providers.analyze(moment, new AbortController().signal), {
+    sections: [], webQueries: [], product: null,
+  });
+});
+
+test("the quick request supplies a focused question behind each label", async () => {
+  const chip = { label: "Hydrostatic head", question: "What does hydrostatic head say about this fabric?" };
+  const providers = createProviders({ apiKey: "test-key", fetcher: async (_url, options) => {
+    const request = JSON.parse(options.body);
+    assert.equal(request.model, "gemini-3.5-flash-lite");
+    assert.equal(request.generation_config.thinking_level, "minimal");
+    assert.deepEqual(request.input.slice(0, 2).map((item) => item.type), ["video", "image"]);
+    const properties = request.response_format.schema.properties;
+    assert.deepEqual(Object.keys(properties), ["heading", "chips"]);
+    assert.equal(properties.chips.maxItems, 2);
+    assert.deepEqual(Object.keys(properties.chips.items.properties), ["label", "question"]);
+    return Response.json({ steps: [{ type: "model_output", content: [{
+      type: "text", text: JSON.stringify({ heading: "Fabric specs", chips: [chip] }),
+    }] }] });
+  } });
+  assert.deepEqual(await providers.quickChips(moment, new AbortController().signal), [{
+    title: "Fabric specs", chips: [chip],
+  }]);
+});
+
+test("vague labels and repeated questions are filtered across sections", () => {
+  const rating = { label: "10,000 mm rating", question: "What rain protection does this rating indicate?" };
+  const jacket = { label: "Self-stowing pocket", question: "Where does the rain shell pack away?" };
+  assert.deepEqual(normalizeSections([
+    { title: "What’s visible", chips: [
+      { label: "Video summary", question: "What happened?" },
+      rating,
+      { label: "10000 mm rating", question: "How is the rating measured?" },
+    ] },
+    { title: "Gear shown earlier", chips: [
+      { label: "Waterproof score", question: "What rain protection does this rating indicate" },
+      jacket,
+    ] },
+  ], 4), [
+    { title: "What’s visible", chips: [rating] },
+    { title: "Gear shown earlier", chips: [jacket] },
+  ]);
+});
+
+test("the final panel keeps an opened topic and prefers distinct suggestions", async () => {
+  const rating = { label: "Waterproof rating", question: "What does this waterproof rating tell the viewer?" };
+  const alias = { label: "Hydrostatic head", question: "How much water pressure can this fabric resist?" };
+  const method = { label: "Water column test", question: "How is this waterproof rating tested?" };
+  const jacket = { label: "Self-stowing pocket", question: "Where does this rain shell pack away?" };
+  const providers = createProviders({ apiKey: "test-key", fetcher: async (url, options) => {
+    const request = JSON.parse(options.body);
+    assert.match(url, /\/decisions$/);
+    assert.equal(Object.keys(request.questions).length, 6);
+    assert.match(request.input, /"index":1,"label":"Hydrostatic head"/);
+    return Response.json({ answers: {
+      same_0_1: { noul: 0.96 }, same_0_2: { noul: 0.91 }, same_1_2: { noul: 0.86 }, same_0_3: { noul: 0.08 },
+    } });
+  } });
+  const matches = await providers.sameTopics([rating, alias, method, jacket], new AbortController().signal);
+  const sections = [{ title: "Clip details", chips: [alias, method, jacket] }];
+  assert.deepEqual(distinctTopics(sections, 1, [0], matches), [{ title: "Clip details", chips: [jacket] }]);
+  assert.deepEqual(distinctTopics(sections, 1, [], matches), [{ title: "Clip details", chips: [alias, jacket] }]);
+});
+
+test("Decision 1 and Neon use separate operations, with grounded sources preserved", async () => {
+  const providers = createProviders({ apiKey: "test-key", fetcher: async (url, options) => {
+    const request = JSON.parse(options.body);
+    if (url.endsWith("/decisions")) {
+      assert.equal(request.model, "gemini-decision-1");
+      assert.deepEqual(Object.keys(request.questions), ["shop", "web"]);
+      return Response.json({ answers: { shop: { noul: 0.9 }, web: { noul: 0.8 } } });
+    }
+    assert.equal(request.model, "gemini-4-neon");
+    assert.deepEqual(request.tools, [{ type: "google_search" }]);
+    return Response.json({
+      steps: [
+        { type: "google_search_result", result: [{ search_suggestions: "<style></style>" }] },
+        { type: "model_output", content: [{
+          type: "text", text: "Available in blue.",
+          annotations: [{ type: "url_citation", url: "https://example.com/item", title: "Item", start_index: 0, end_index: 18 }],
+        }] },
+      ],
+    });
+  } });
+  const signal = new AbortController().signal;
+  assert.deepEqual(await providers.decide({ product: { label: "Jacket" } }, signal), { shop: 0.9, web: 0.8 });
+  const result = await providers.search([{ query: "Jacket" }], "jacket", signal);
+  assert.equal(result.searched, true);
+  assert.equal(result.blocks[0].citations[0].url, "https://example.com/item");
+  assert.deepEqual(result.suggestions, ["<style></style>"]);
+});
+
+test("Shopify Global Catalog MCP preserves the variant link and applies an explicit budget", async () => {
+  const url = "https://example.com/products/jacket?variant=42&campaign=shop";
+  const providers = createProviders({ fetcher: async (endpoint, options) => {
+    assert.equal(endpoint, "https://catalog.shopify.com/api/ucp/mcp");
+    const { params } = JSON.parse(options.body);
+    assert.equal(params.name, "search_catalog");
+    assert.match(params.arguments.meta["ucp-agent"].profile, /^https:\/\/shopify\.dev\//);
+    assert.equal(params.arguments.catalog.filters.price.max, 10_000);
+    return Response.json({ result: { structuredContent: {
+      products: [{
+        title: "Packable jacket",
+        variants: [{ url, price: { amount: 6400, currency: "USD" }, seller: { name: "Merchant" } }],
+      }],
+      messages: [{ type: "warning", content: "Some availability varies." }],
+    } } });
+  } });
+  const result = await providers.shop({ query: "packable rain jacket", maxUsd: 100 }, new AbortController().signal);
+  assert.deepEqual(result, {
+    warnings: ["Some availability varies."],
+    items: [{ title: "Packable jacket", price: "$64.00", merchant: "Merchant", image: null, url }],
+  });
+});
+
+test("key import reads GEMINI_API_KEY from the chosen env file", () => {
+  assert.equal(parseGeminiKeyFile("PRIVATE_OTHER=secret\r\nexport GEMINI_API_KEY = 'example-gemini-key' # note\r\n"), "example-gemini-key");
+  assert.equal(parseGeminiKeyFile("GEMINI_API_KEY=old\nGEMINI_API_KEY=new # use latest"), "new");
+  assert.equal(parseGeminiKeyFile("OTHER_GEMINI_API_KEY=unrelated\n# GEMINI_API_KEY=comment"), "");
+});
+
+test("Gemini credentials are scoped to the API header and redacted from errors", async () => {
+  const key = "example-gemini-key";
+  const providers = createProviders({ apiKey: key, fetcher: async (url, options) => {
+    assert.equal(new URL(url).hostname, "generativelanguage.googleapis.com");
+    assert.equal(options.headers["x-goog-api-key"], key);
+    assert.equal(options.body.includes(key), false);
+    return Response.json({ error: { message: "Invalid " + key } }, { status: 400 });
+  } });
+  await assert.rejects(providers.analyze(moment, new AbortController().signal), /Invalid \[redacted\]/);
+});
