@@ -6,7 +6,21 @@ function clean(value, limit) {
   return typeof value === "string" ? value.trim().slice(0, limit) : "";
 }
 
+function sceneFocus(value) {
+  const title = clean(value?.title, 75);
+  const detail = clean(value?.detail, 165);
+  if (!title || !detail) return null;
+  const dish = value.kind === "dish";
+  return {
+    title, detail,
+    kind: dish ? "dish" : "subject",
+    ingredient: dish ? clean(value.ingredient, 70) : "",
+    tip: dish ? clean(value.tip, 125) : "",
+  };
+}
+
 function modelEvidence(result, moment, preview = false) {
+  const focus = sceneFocus(result.focus);
   const products = (Array.isArray(result.products) ? result.products : []).slice(0, 2).flatMap((candidate, index) => {
     const name = clean(candidate?.name, 100);
     const evidence = clean(candidate?.evidence, 240);
@@ -18,6 +32,19 @@ function modelEvidence(result, moment, preview = false) {
       maxUsd: Number.isFinite(candidate.maxUsd) ? candidate.maxUsd : null,
     }];
   });
+  if (focus?.ingredient) {
+    const ingredient = {
+      id: preview ? "preview_ingredient" : "scene_ingredient",
+      kind: "shop", name: focus.ingredient, exact: false, maxUsd: null,
+      description: "Grocery ingredient for " + focus.title,
+      evidence: focus.detail, ingredient: true,
+    };
+    const key = lookupKey(ingredient);
+    const duplicate = products.findIndex((product) => lookupKey(product) === key);
+    if (duplicate >= 0) products.splice(duplicate, 1);
+    products.unshift(ingredient);
+    products.length = Math.min(products.length, 2);
+  }
   const listed = products.find((product) => product.exact && product.productPage) ||
     (moment.amazonItem && products.find((product) => product.exact));
   const webQueries = (Array.isArray(result.webQueries) ? result.webQueries : []).slice(0, 5).flatMap((entry, index) => {
@@ -27,9 +54,15 @@ function modelEvidence(result, moment, preview = false) {
     const kind = clean(entry?.kind, 20);
     const subject = clean(entry?.subject, 200);
     const evidence = clean(entry?.evidence, 240);
+    if (focus?.kind === "dish" && kind === "person") return [];
     if (listed && kind === "answer" && /\breviews?\b/i.test(title + " " + label)) return [];
     return query && title && label && kind && kind !== "review" && evidence
       ? [{ id: (preview ? "preview_" : "web_") + index, title, label, query, kind, subject, evidence }] : [];
+  });
+  if (focus?.kind === "dish") webQueries.unshift({
+    id: preview ? "preview_recipe" : "scene_recipe", kind: "recipe",
+    title: "Recipes", label: focus.title, subject: focus.title,
+    query: focus.title + " home recipe ingredients instructions", evidence: focus.detail,
   });
   const place = webQueries.find(({ kind, subject }) => kind === "visit" && subject);
   if (place && !webQueries.some((entry) => entry.kind === "video" && lookupKey(entry) === lookupKey({ ...place, kind: "video" }))) {
@@ -93,19 +126,20 @@ function matchingPrefetch(entry, early) {
   }
 }
 
-function lookupLink({ id, kind, title, label, name, exact, subject }) {
-  return kind === "shop" ? { id, kind, name, exact }
+function lookupLink({ id, kind, title, label, name, exact, subject, ingredient }) {
+  return kind === "shop" ? { id, kind, name, exact, ...(ingredient ? { ingredient } : {}) }
     : { id, kind, title, label, ...(kind === "visit" ? { subject } : {}) };
 }
 
-async function fetchProducts(providers, entry, signal, send, preview) {
+async function fetchProducts(providers, entry, signal, send, preview, approval) {
   const results = await Promise.allSettled(["shop", "merchantListings"].map(async (source) => {
-    const result = await providers[source](entry, signal);
+    const [result, approved] = await Promise.all([providers[source](entry, signal), approval]);
+    if (!approved || signal.aborted) return 0;
     const items = await providers.verifyProducts(entry, result.items, signal);
     if (!signal.aborted && items.length) send("shop", { id: entry.id, source, items, suggestions: result.suggestions });
     return items.length;
   }));
-  if (signal.aborted) return false;
+  if (signal.aborted || !await approval) return false;
   const found = results.some((result) => result.status === "fulfilled" && result.value > 0);
   const failed = results.every((result) => result.status === "rejected");
   if (failed && !preview) send("warning", { id: entry.id, message: "Shopping results are temporarily unavailable." });
@@ -113,15 +147,16 @@ async function fetchProducts(providers, entry, signal, send, preview) {
   return found;
 }
 
-async function fetchLookup(providers, entry, moment, signal, send, preview = false) {
-  if (entry.kind === "shop") return fetchProducts(providers, entry, signal, send, preview);
+async function fetchLookup(providers, entry, moment, signal, send, preview = false, approval = true) {
+  if (entry.kind === "shop") return fetchProducts(providers, entry, signal, send, preview, approval);
   try {
-    const result = await providers.search(entry.kind === "video" && moment.videoId ? { ...entry, excludeVideoId: moment.videoId } : entry, signal);
-    if (signal.aborted) return false;
+    const query = entry.kind === "video" && moment.videoId ? { ...entry, excludeVideoId: moment.videoId } : entry;
+    const [result, approved] = await Promise.all([providers.search(query, signal), approval]);
+    if (!approved || signal.aborted) return false;
     send("web", { id: entry.id, ...result });
     return Boolean(result.destinations?.length);
   } catch (error) {
-    if (!signal.aborted) send("warning", { id: entry.id, message: preview ? "" : error.message });
+    if (!signal.aborted && await approval) send("warning", { id: entry.id, message: preview ? "" : error.message });
     return false;
   }
 }
@@ -129,14 +164,21 @@ async function fetchLookup(providers, entry, moment, signal, send, preview = fal
 function startEarlyLookups(providers, plan, moment, signal, send, early) {
   const evidence = modelEvidence(plan, moment, true);
   evidence.webQueries = evidence.webQueries.filter((entry) =>
-    entry.subject && ["paper", "person", "video", "review"].includes(entry.kind)).slice(0, 2);
+    entry.subject && ["recipe", "paper", "person", "video", "review"].includes(entry.kind)).slice(0, 2);
   const entries = [...evidence.products, ...evidence.webQueries];
   if (!entries.length) return;
   const routing = providers.decide(evidence, signal).catch(() => null);
   return Promise.all(entries.map((entry) => {
     const task = (async () => {
-      const approved = await routing;
-      if (signal.aborted || !(approved?.[entry.id] >= minimumYes)) return false;
+      const approval = routing.then((result) => result?.[entry.id] >= minimumYes);
+      if (entry.kind === "recipe" || entry.ingredient) {
+        send("lookup", { links: [lookupLink(entry)], preview: true });
+        const work = fetchLookup(providers, entry, moment, signal, send, true, approval);
+        if (await approval) return work;
+        if (!signal.aborted) send("warning", { id: entry.id, message: "" });
+        return false;
+      }
+      if (!await approval || signal.aborted) return false;
       send("lookup", { links: [lookupLink(entry)], preview: true });
       return fetchLookup(providers, entry, moment, signal, send, true);
     })();
@@ -189,14 +231,16 @@ export async function inspectMoment(providers, moment, signal, send) {
     if (providers.quickPlan) {
       void providers.quickPlan(moment, signal).then((plan) => {
         if (signal.aborted || fullReady) return;
-        send("preview", { sections: plan.sections });
+        const focus = sceneFocus(plan.focus);
+        send("preview", { sections: plan.sections, ...(focus ? { focus } : {}) });
         earlyTask = startEarlyLookups(providers, plan, moment, signal, send, early);
       }).catch(() => {});
     }
     const result = await providers.analyze(moment, signal);
     fullReady = true;
     const evidence = modelEvidence(result, moment);
-    send("context", { sections: normalizeSections(result.sections, 5) });
+    const focus = sceneFocus(result.focus);
+    send("context", { sections: normalizeSections(result.sections, 5), ...(focus ? { focus } : {}) });
     await runLookups(providers, evidence, result, moment, signal, send, early);
     await earlyTask;
   } catch (error) {

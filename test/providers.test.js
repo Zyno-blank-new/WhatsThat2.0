@@ -58,10 +58,11 @@ test("the quick request returns section names, instant answers, and placeholders
     assert.equal(request.input[0].data, moment.clip.previewVideo.split(",")[1]);
     assert.match(request.system_instruction, /greatest weight to the last two seconds/);
     const properties = request.response_format.schema.properties;
-    assert.deepEqual(Object.keys(properties), ["sections", "products", "webQueries"]);
+    assert.deepEqual(Object.keys(properties), ["focus", "sections", "products", "webQueries"]);
+    assert.ok(properties.focus.required.includes("ingredient"));
     assert.equal(properties.products.maxItems, 2);
     assert.ok(properties.products.items.required.includes("description"));
-    assert.match(request.system_instruction, /distinctive items people wear/);
+    assert.match(request.system_instruction, /things people wear, use, or demonstrate/);
     assert.equal(properties.sections.maxItems, 4);
     assert.equal(properties.webQueries.maxItems, 1);
     assert.deepEqual(Object.keys(properties.sections.items.properties.chips.items.properties), ["label", "question", "answer", "sourceQuery"]);
@@ -173,6 +174,51 @@ test("both shopping sources publish only verified items without waiting for the 
     ["shop", [catalogHat]], ["merchantListings", [webHat]],
   ]);
   assert.equal(events.at(-2).complete, true);
+});
+
+test("a dish starts recipe and ingredient searches during routing and skips presenter links", async () => {
+  const full = Promise.withResolvers();
+  const decision = Promise.withResolvers();
+  const focus = { kind: "dish", title: "Pan-seared steak", detail: "A seared steak is sliced beside potatoes.",
+    ingredient: "Ribeye steak", tip: "Pat the steak dry before searing for a better crust." };
+  const person = { kind: "person", title: "Creators", label: "Presenter", subject: "Presenter Name",
+    query: "Presenter Name", evidence: "They introduce the video." };
+  const events = [];
+  const started = [];
+  const record = (name) => {
+    started.push(name);
+    if (started.length === 3) {
+      assert.equal(events.filter(({ type }) => type === "shop" || type === "web").length, 0);
+      decision.resolve({ preview_ingredient: 0.1, preview_recipe: 1 });
+    }
+  };
+  const providers = {
+    quickPlan: async () => ({ focus, sections: [], webQueries: [person] }),
+    analyze: () => full.promise,
+    decide: async ({ products, webQueries }) => {
+      if (!products.length) return {};
+      assert.equal(products[0].name, "Ribeye steak");
+      assert.equal(products[0].ingredient, true);
+      assert.deepEqual(webQueries.map(({ kind }) => kind), ["recipe"]);
+      return decision.promise;
+    },
+    search: async ({ kind, query }) => {
+      record(kind);
+      assert.match(query, /Pan-seared steak.*recipe/);
+      return { destinations: [{ url: "https://recipes.example/pan-seared-steak" }] };
+    },
+    shop: async () => { record("shop"); return { items: [{ title: "Ribeye steak" }] }; },
+    merchantListings: async () => { record("merchantListings"); return { items: [] }; },
+    verifyProducts: async () => assert.fail("Rejected ingredient must never be presented"),
+  };
+  await inspectMoment(providers, moment, AbortSignal.timeout(1000), (type, value) => {
+    events.push({ type, ...value });
+    if (type === "web") full.resolve({ sections: [], webQueries: [], products: [] });
+  });
+  assert.deepEqual(started.sort(), ["merchantListings", "recipe", "shop"]);
+  assert.equal(events[0].focus.tip, focus.tip);
+  assert.ok(events.some(({ type, id }) => type === "warning" && id === "preview_ingredient"));
+  assert.ok(events.every(({ type }) => type !== "shop"));
 });
 
 test("a landmark visit adds a related video search and a product detail page adds independent reviews", async () => {
@@ -487,6 +533,23 @@ test("review summaries and cards require citations to specific review pages", as
   const result = await providers.search({ kind: "review", query: "Sony WH-1000XM5 independent reviews" }, new AbortController().signal);
   assert.equal(result.summary, summary.slice("Summary: ".length));
   assert.deepEqual(result.destinations.map((item) => item.url), [url]);
+});
+
+test("recipe cards use the written recipe citation and never display raw URLs as copy", async () => {
+  const url = "https://recipe.example/seared-steak";
+  const text = "Seared steak recipe | " + url;
+  const annotations = ["https://www.youtube.com/watch?v=ABCDEFGHIJK", url].map((citation) => ({
+    type: "url_citation", url: citation, start_index: 0, end_index: text.length,
+  }));
+  const providers = createProviders({ apiKey: "test-key", fetcher: async (_url, options) => {
+    assert.equal(JSON.parse(options.body).model, "gemini-3.5-flash-lite");
+    return Response.json({ steps: [
+      { type: "google_search_result", result: [] },
+      { type: "model_output", content: [{ type: "text", text, annotations }] },
+    ] });
+  } });
+  const result = await providers.search({ kind: "recipe", query: "seared steak recipe" }, AbortSignal.timeout(1000));
+  assert.deepEqual(result.destinations, [{ title: "Seared steak recipe", reason: "", url, site: "recipe.example" }]);
 });
 
 test("web shopping accepts direct retailer product pages and checks their relevance in Decisions", async () => {

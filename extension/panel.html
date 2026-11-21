@@ -37,13 +37,32 @@
       </div>
       <video id="clip" controls playsinline preload="none" hidden></video>
     </section>
+    <section id="moment-focus" class="moment-focus" aria-labelledby="focus-title" hidden>
+      <div class="focus-content">
+        <div class="focus-shot"><img id="focus-image" alt="" hidden></div>
+        <div class="focus-copy">
+          <div id="focus-placeholder" class="skeleton-lines" aria-hidden="true">
+            <span class="skeleton"></span><span class="skeleton"></span><span class="skeleton"></span>
+          </div>
+          <h2 id="focus-title" hidden></h2>
+          <p id="focus-detail" hidden></p>
+        </div>
+      </div>
+      <div id="focus-actions" class="focus-actions" hidden>
+        <button id="focus-recipes" class="focus-action primary" type="button" hidden>Recipes <span aria-hidden="true">↓</span></button>
+        <button id="focus-ingredients" class="focus-action" type="button" hidden>Shop ingredients <span aria-hidden="true">↓</span></button>
+      </div>
+      <details id="focus-tip" class="focus-tip" hidden>
+        <summary>Cooking tip</summary>
+        <p id="focus-tip-text"></p>
+      </details>
+    </section>
     <div id="status" class="status" role="status" hidden></div>
     <div id="recording-note" class="notice" hidden></div>
     <div id="sections">
-      <section id="products" class="section" aria-labelledby="products-title">
+      <section id="products" class="section" aria-labelledby="products-title" tabindex="-1" hidden>
         <h2 id="products-title">Products</h2>
         <div id="product-results"></div>
-        <p id="product-status" class="results-empty" role="status">Capture a moment to find related products.</p>
       </section>
     </div>
     <div id="suggestion-skeleton" aria-hidden="true" hidden>

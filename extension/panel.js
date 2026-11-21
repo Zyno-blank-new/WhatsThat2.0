@@ -12,7 +12,10 @@ const ui = {
   source: $("source"), clip: $("clip"), skeleton: $("suggestion-skeleton"),
   preview: $("preview-button"), status: $("status"), notice: $("recording-note"),
   sections: $("sections"), conversation: $("conversation"),
-  products: $("products"), productResults: $("product-results"), productStatus: $("product-status"),
+  products: $("products"), productResults: $("product-results"), productsTitle: $("products-title"),
+  focus: $("moment-focus"), focusImage: $("focus-image"), focusTitle: $("focus-title"),
+  focusDetail: $("focus-detail"), focusPlaceholder: $("focus-placeholder"), focusActions: $("focus-actions"),
+  focusRecipes: $("focus-recipes"), focusIngredients: $("focus-ingredients"), focusTip: $("focus-tip"), focusTipText: $("focus-tip-text"),
   lookback: $("lookback"), lookbackLabel: $("lookback-label"), form: $("ask-form"),
   question: $("question"), ask: $("ask-button"),
 };
@@ -70,7 +73,8 @@ function setStatus(message, style = "") {
 }
 
 function updateSkeletons() {
-  ui.skeleton.hidden = (!sectionsPending && !routingPending) || Boolean(ui.sections.querySelector(".planned-skeleton"));
+  ui.skeleton.hidden = (!sectionsPending && !routingPending) || !ui.focusTitle.hidden ||
+    Boolean(ui.sections.querySelector(".planned-skeleton"));
   const filled = Math.min(chipGroups.size, ui.skeleton.children.length - 1);
   for (const [index, row] of [...ui.skeleton.children].entries()) row.hidden = index < filled;
 }
@@ -79,7 +83,7 @@ function startLoading(message) {
   sectionsPending = true;
   routingPending = true;
   setStatus(message, "busy");
-  setProductStatus("Checking for related products…");
+  ui.focus.hidden = false;
   updateSkeletons();
 }
 
@@ -88,7 +92,7 @@ function analysisError(message) {
   routingPending = false;
   clearPlannedSections();
   setStatus(message, "error");
-  if (!productUrls.size) setProductStatus("Capture another moment to find related products.");
+  if (ui.focusTitle.hidden) ui.focus.hidden = true;
   updateSkeletons();
 }
 
@@ -98,15 +102,42 @@ function setNotice(message, error = false) {
   ui.notice.classList.toggle("error", error);
 }
 
-function setProductStatus(message = "") {
-  ui.productStatus.hidden = !message;
-  ui.productStatus.textContent = message;
+function updateFocusActions() {
+  const isDish = ui.focus.dataset.kind === "dish";
+  ui.focusRecipes.hidden = !isDish || !ui.sections.querySelector('[data-kind="recipe"]');
+  ui.focusIngredients.hidden = !isDish || ui.products.hidden || !ui.productResults.querySelector("[data-ingredient]");
+  ui.focusActions.hidden = ui.focusRecipes.hidden && ui.focusIngredients.hidden;
 }
 
 function updateProducts() {
-  if (productUrls.size || ui.productResults.querySelector('[aria-busy="true"]')) setProductStatus();
-  else if (sectionsPending || routingPending) setProductStatus("Checking for related products…");
-  else setProductStatus("No matching products for this moment.");
+  ui.products.hidden = !productUrls.size && !ui.productResults.querySelector('[aria-busy="true"]');
+  ui.productsTitle.textContent = ui.productResults.querySelector("[data-ingredient]") ? "Shop ingredients" : "Products";
+  updateFocusActions();
+}
+
+function showFocus(focus) {
+  if (!focus) return;
+  const first = ui.focusTitle.hidden;
+  ui.focus.hidden = false;
+  ui.focus.dataset.kind = focus.kind;
+  ui.focusPlaceholder.hidden = true;
+  ui.focusTitle.hidden = ui.focusDetail.hidden = false;
+  ui.focusTitle.textContent = focus.title;
+  ui.focusDetail.textContent = focus.detail;
+  ui.focusTip.hidden = !focus.tip;
+  ui.focusTipText.textContent = focus.tip;
+  updateFocusActions();
+  if (first && moment) console.info("What’sThat? first scene insight", (Date.now() - moment.capturedAt) + " ms");
+}
+
+function resetFocus() {
+  ui.focus.hidden = true;
+  delete ui.focus.dataset.kind;
+  ui.focusTitle.hidden = ui.focusDetail.hidden = ui.focusImage.hidden = ui.focusTip.hidden = true;
+  ui.focusImage.removeAttribute("src");
+  ui.focusPlaceholder.hidden = false;
+  ui.focusTip.open = false;
+  ui.focusActions.hidden = true;
 }
 
 function stopTask() {
@@ -127,7 +158,8 @@ function stopTask() {
   pendingProductImages.clear();
   ui.sections.replaceChildren(ui.products);
   ui.productResults.replaceChildren();
-  setProductStatus("Capture a moment to find related products.");
+  resetFocus();
+  updateProducts();
   ui.conversation.replaceChildren();
   ui.question.value = "";
   ui.question.disabled = true;
@@ -335,19 +367,21 @@ async function refineSuggestions(providers, value, signal) {
 }
 
 function mountLookups(links) {
-  for (const { id, title, label, kind, name, exact, subject } of links) {
+  for (const { id, title, label, kind, name, exact, subject, ingredient } of links) {
     if (kind === "shop") {
       const body = make("div", "product-results");
       showPending(body, "Looking up products…");
       if (name) {
-        body.dataset.heading = exact ? name : "Similar to " + name;
+        body.dataset.heading = exact || ingredient ? name : "Similar to " + name;
         body.prepend(make("h3", "product-group-name", body.dataset.heading));
       }
+      if (ingredient) body.dataset.ingredient = "";
       ui.productResults.append(body);
       lookupEntries.set(id, body);
       continue;
     }
     const group = getGroup(title, kind === "review");
+    if (kind === "recipe") group.block.tabIndex = -1;
     clearPlannedGroup(group);
     const inline = kind !== "answer";
     const body = make("div", inline ? "lookup-inline" : "lookup-body");
@@ -468,7 +502,7 @@ function showDestinations(block, destinations) {
   const video = kind === "video";
   const place = kind === "visit";
   const imageHolders = [];
-  const type = { paper: "Research paper", person: "Biography", video: "Video", visit: "Visitor information", review: "Review", order: "Ordering page" }[kind];
+  const type = { paper: "Research paper", person: "Biography", video: "Video", visit: "Visitor information", review: "Review", recipe: "Recipe", order: "Ordering page" }[kind];
   for (const { title, reason, url, site, videoUrl } of destinations) {
     const videoKey = video && (youtubeVideoId(url) || youtubeVideoId(videoUrl) || url);
     if (videoKey && shownVideos.has(videoKey)) continue;
@@ -553,6 +587,7 @@ function showWeb({ id, blocks, destinations, suggestions, searched, summary }) {
       lookupEntries.delete(id);
       pruneEmptyGroups();
     }
+    updateFocusActions();
     return;
   }
   if (!blocks.length || !searched) {
@@ -635,9 +670,13 @@ function appendSearchSuggestions(block, suggestions) {
 }
 
 function receiveAnalysis(event) {
-  if (event.type === "preview") showPlan(event.sections);
+  if (event.type === "preview") {
+    showFocus(event.focus);
+    showPlan(event.sections);
+  }
   if (event.type === "context") {
     sectionsPending = false;
+    showFocus(event.focus);
     if (event.sections.length) replaceSuggestions(event.sections);
     if (!routingPending) setStatus();
     updateSkeletons();
@@ -673,7 +712,8 @@ function receiveAnalysis(event) {
     clearPlannedSections();
     if (!ui.status.classList.contains("error")) updateProducts();
     if (!sectionsPending && !ui.status.classList.contains("error")) {
-      setStatus(chipGroups.size || productUrls.size ? undefined : "There was too little context for specific suggestions.");
+      if (ui.focusTitle.hidden) ui.focus.hidden = true;
+      setStatus(chipGroups.size || productUrls.size || !ui.focusTitle.hidden ? undefined : "There was too little context for specific suggestions.");
     }
     updateSkeletons();
   }
@@ -711,11 +751,18 @@ function begin(job) {
   ui.preview.hidden = false;
   ui.preview.title = `Previous ${(job.clip.durationMs / 1000).toFixed(1)} seconds`;
   if (job.clip.durationMs < 3500) {
-    setNotice("Lookback just started. This first clip is shorter.");
+    ui.preview.title += " · Lookback just started";
   }
   controller = new AbortController();
   startLoading("Finding suggestions…");
-  void consumeAnalysis(moment, controller.signal);
+  const signal = controller.signal;
+  const seconds = Math.max(0, job.clip.durationMs / 1000 - 0.2);
+  void productThumbnail(job.clip, { seconds, box: [0, 0, 1000, 1000] }, signal).then((image) => {
+    if (!image || signal.aborted) return;
+    ui.focusImage.src = image;
+    ui.focusImage.hidden = false;
+  });
+  void consumeAnalysis(moment, signal);
 }
 
 function recordingState(enabled, error) {
@@ -747,6 +794,10 @@ function connect() {
   port.postMessage({ type: "subscribe", windowId });
 }
 connect();
+ui.focusRecipes.addEventListener("click", () => {
+  ui.sections.querySelector('[data-kind="recipe"]')?.closest("section")?.focus();
+});
+ui.focusIngredients.addEventListener("click", () => ui.products.focus());
 setupKeySettings((hasKey) => {
   if (!hasKey && controller) {
     stopTask();
