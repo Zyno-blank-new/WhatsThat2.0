@@ -264,7 +264,11 @@ test("without a valid grounding citation, prose and generic URLs cannot become a
     { type: "google_search_result", result: [] },
     { type: "model_output", content: [{
       type: "text", text,
-      annotations: [{ type: "url_citation", title: "example.com", url: "https://example.com/", start_index: 0, end_index: text.length }],
+      annotations: [
+        ["example.com", "https://example.com/"],
+        ["google.com", "https://www.google.com/?q=exact+tour"],
+        ["google.com", "https://vertexaisearch.cloud.google.com/grounding-api-redirect/search-result"],
+      ].map(([title, url]) => ({ type: "url_citation", title, url, start_index: 0, end_index: text.length })),
     }] },
     { type: "model_output", content: [{ type: "text", text: "Invented | https://example.org/tour" }] },
   ] }) });

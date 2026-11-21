@@ -316,21 +316,23 @@ function showShop({ id, items, warnings }) {
 
 function showDestinations(block, destinations) {
   const list = make("div", "destinations");
-  const video = block.dataset.kind === "video";
+  const kind = block.dataset.kind;
+  const video = kind === "video";
+  const type = { paper: "Research paper", person: "Biography", video: "Video", visit: "Visitor information", order: "Ordering page" }[kind];
   for (const { title, reason, url, site } of destinations) {
-    const card = link(url, video ? "destination destination-video" : "destination");
+    const card = link(url, "destination");
     if (!card) continue;
-    if (video) {
-      const preview = make("span", "destination-preview");
-      preview.setAttribute("aria-hidden", "true");
-      card.append(preview);
-    }
+    const icon = make("span", video ? "destination-icon destination-preview" : "destination-icon destination-document");
+    icon.setAttribute("aria-hidden", "true");
     const copy = make("span", "destination-copy");
-    copy.append(make("span", "destination-title", title),
-      make("span", "destination-site", site), make("span", "destination-reason", reason));
-    const arrow = make("span", "product-arrow", "↗");
+    const meta = make("span", "destination-meta");
+    if (type) meta.append(type + " · ");
+    meta.append(make("span", "destination-site", site));
+    copy.append(make("span", "destination-title", title), meta);
+    if (reason) copy.append(make("span", "destination-reason", reason));
+    const arrow = make("span", "destination-arrow", "↗");
     arrow.setAttribute("aria-hidden", "true");
-    card.append(copy, arrow);
+    card.append(icon, copy, arrow);
     list.append(card);
   }
   if (list.children.length) block.append(list);
@@ -408,6 +410,8 @@ function appendCitedText(container, blocks) {
 
 function appendSearchSuggestions(block, suggestions) {
   if (!suggestions.length) return;
+  const disclosure = make("details", "related-searches");
+  disclosure.append(make("summary", "", "Related searches"));
   const rail = make("div", "search-rail");
   if (suggestions.length > 1) {
     rail.tabIndex = 0;
@@ -423,7 +427,8 @@ function appendSearchSuggestions(block, suggestions) {
       '<meta http-equiv="Content-Security-Policy" content="default-src \'none\'; style-src \'unsafe-inline\'; img-src data: https:">' + html;
     rail.append(frame);
   }
-  block.append(rail);
+  disclosure.append(rail);
+  block.append(disclosure);
 }
 
 function receiveAnalysis(event) {

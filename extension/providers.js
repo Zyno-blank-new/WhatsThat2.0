@@ -159,6 +159,8 @@ function destinationSite(citation, kind) {
   const host = googleRedirect ? citation.title : url.hostname;
   const site = typeof host === "string" ? host.trim().toLowerCase().replace(/^www\./, "") : "";
   if (!/^[a-z0-9.-]+\.[a-z]{2,}$/.test(site)) return null;
+  const googleSearch = /^(?:m\.)?google\.[a-z.]+$/.test(site);
+  if (googleSearch && (googleRedirect || url.searchParams.has("q") || /^\/(url|webhp)\/?$/.test(url.pathname))) return null;
   if (kind === "person") {
     if (site !== "wikipedia.org" && !site.endsWith(".wikipedia.org")) return null;
     const article = /^\/wiki\/(?![^/]*(?::|%3a))[^/]+$/i.test(url.pathname) &&
